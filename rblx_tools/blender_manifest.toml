@@ -1,0 +1,16 @@
+schema_version = "1.0.0"
+
+id = "rblx_tools"
+version = "0.1.0"
+name = "RBLX Tools"
+tagline = "Import Roblox models and places, with Roblox lighting and parts"
+maintainer = "RBLX-Tools contributors"
+type = "add-on"
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+tags = ["Import-Export", "Lighting", "Object"]
+
+[permissions]
+files = "Import Roblox files, meshes and images from disk"

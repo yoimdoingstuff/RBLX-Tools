@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+dist/
+*.zip
+
+# Third-party Roblox Studio plugins kept locally for testing; don't redistribute
+moonanimator2.rbxm
+eclipseanimator.rbxm
