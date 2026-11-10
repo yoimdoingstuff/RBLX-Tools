@@ -134,9 +134,9 @@ def _build_head(bm, size):
     return res
 
 
-def build_primitive(me, shape, size):
-    """Rebuild mesh `me` as a Roblox primitive. `size` is in Blender units
-    along Roblox local axes (x, y, z)."""
+def build_primitive(me, shape, size, bevel=0.0):
+    """Rebuild mesh `me` as a Roblox primitive. `size` and `bevel` are in
+    Blender units along Roblox local axes (x, y, z)."""
     bm = bmesh.new()
     hx, hy, hz = (max(s, 1e-4) / 2.0 for s in size)
     if shape == "BALL":
@@ -153,6 +153,12 @@ def build_primitive(me, shape, size):
         _build_box(bm, hx, hy, hz)
     bm.normal_update()
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    if bevel > 1e-6 and shape in ("BLOCK", "TRUSS", "WEDGE", "CORNER_WEDGE"):
+        # A single chamfer like Roblox's own R6 body meshes
+        limit = min(hx, hy, hz) * 0.9
+        bmesh.ops.bevel(bm, geom=list(bm.edges), offset=min(bevel, limit), offset_type="OFFSET",
+                        segments=1, profile=0.5, affect="EDGES", clamp_overlap=True)
+        bm.normal_update()
     bm.to_mesh(me)
     bm.free()
     if shape in BOX_SHAPES or shape not in ("BALL", "CYLINDER", "HEAD"):
@@ -160,13 +166,16 @@ def build_primitive(me, shape, size):
     me.update()
 
 
-def project_face_uvs(me, layer_name, half, region=None):
-    """UVs for box-like meshes: each face gets the image as seen from
-    outside (0..1), or its area of the clothing template when `region` is
-    given ("TORSO", "LEFT_LIMB", "RIGHT_LIMB")."""
+def project_face_uvs(me, layer_name, half, region=None, center=(0.0, 0.0, 0.0)):
+    """UVs by projecting onto a box (Roblox axes, `half` extents around
+    `center`): every polygon takes the box side it faces. Each side shows the
+    image as seen from outside (0..1), or its area of the clothing template
+    when `region` is given ("TORSO", "LEFT_LIMB", "RIGHT_LIMB"). Works for
+    blocks and for curved meshes (R6 body packages, R15 bodies)."""
     uv_layer = me.uv_layers.get(layer_name) or me.uv_layers.new(name=layer_name)
     hx, hy, hz = (max(h, 1e-6) for h in half)
     half_v = Vector((hx, hy, hz))
+    c = Vector(center)
     rects = TEMPLATE_RECTS.get(region) if region else None
     W, H = TEMPLATE_SIZE
     for poly in me.polygons:
@@ -175,9 +184,9 @@ def project_face_uvs(me, layer_name, half, region=None):
         hu = abs(u.x) * half_v.x + abs(u.y) * half_v.y + abs(u.z) * half_v.z
         hv = abs(up.x) * half_v.x + abs(up.y) * half_v.y + abs(up.z) * half_v.z
         for li in poly.loop_indices:
-            p = _rbx(me.vertices[me.loops[li].vertex_index].co)
-            s = p.dot(u) / (2.0 * hu) + 0.5
-            t = p.dot(up) / (2.0 * hv) + 0.5
+            p = _rbx(me.vertices[me.loops[li].vertex_index].co) - c
+            s = min(max(p.dot(u) / (2.0 * hu) + 0.5, 0.0), 1.0)
+            t = min(max(p.dot(up) / (2.0 * hv) + 0.5, 0.0), 1.0)
             if rects:
                 rx, ry, rw, rh = rects[face]
                 x = rx + s * rw
@@ -241,20 +250,34 @@ def part_box_size(part_obj):
 
 
 def ensure_template_uvs(obj):
-    """Add clothing-template UV maps needed by the part's layers (box parts)."""
+    """Add the clothing-template UV maps the part's layers need.
+
+    Blocks project onto their own box. Mesh body parts (R6 packages, R15)
+    project onto the clothing box stored in obj["rblx_template_box"]
+    (centre + half extents, Roblox axes, object-local Blender units): Roblox
+    composites clothing onto these meshes by body side, not by their UVs."""
     r = obj.rblx
-    if obj.type != "MESH" or r.shape not in ("BLOCK", "TRUSS"):
+    if obj.type != "MESH":
         return
     regions = {l.template_region for l in r.layers if l.mapping == "TEMPLATE"}
     if not regions:
         return
-    scale = coords.stud_scale()
-    half = tuple(s * scale / 2.0 for s in part_box_size(obj))
     me = obj.data
+    if r.shape in ("BLOCK", "TRUSS"):
+        scale = coords.stud_scale()
+        half = tuple(s * scale / 2.0 for s in part_box_size(obj))
+        center = (0.0, 0.0, 0.0)
+        fresh = False
+    else:
+        box = obj.get("rblx_template_box")
+        if box is None or len(box) != 6:
+            return
+        center, half = tuple(box[:3]), tuple(box[3:])
+        fresh = True  # shared meshes / changed boxes: always recompute
     for region in regions:
         name = "RBX_Template_" + region
-        if me.uv_layers.get(name) is None:
-            project_face_uvs(me, name, half, region)
+        if fresh or me.uv_layers.get(name) is None:
+            project_face_uvs(me, name, half, region, center)
     if me.uv_layers.get("UVMap") is not None:
         me.uv_layers.active = me.uv_layers["UVMap"]
         me.uv_layers["UVMap"].active_render = True
@@ -273,7 +296,7 @@ def rebuild_part(obj):
         me = ensure_single_user_mesh(obj)
         if me is None:
             return
-        build_primitive(me, r.shape, tuple(s * scale for s in size))
+        build_primitive(me, r.shape, tuple(s * scale for s in size), r.bevel * scale)
         _set_scale_keep_world(obj, Vector((1.0, 1.0, 1.0)))
         ensure_template_uvs(obj)
         from . import materials

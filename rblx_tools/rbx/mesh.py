@@ -6,7 +6,8 @@ Supported: versions 1.00/1.01 (text), 2.00, 3.00/3.01, 4.00/4.01, 5.00, and
 set_draco_decoder).
 
 Returns positions/normals/uvs in Roblox studs (Y-up) and triangle indices.
-UV v is flipped into Blender's convention (v = 1 - v)."""
+UVs are returned in Blender's convention: v2+ binary meshes store V top-down
+and are flipped (v = 1 - v); v1 text meshes already match."""
 
 import re
 import struct
@@ -87,7 +88,9 @@ def _read_v1(text, version):
             tri.append(len(pos))
             pos.append((p[0] * scale, p[1] * scale, p[2] * scale))
             nrm.append(tuple(n))
-            uvs.append((t[0], 1.0 - t[1]))
+            # v1 text meshes already store V bottom-up (unlike v2+); checked
+            # against Roblox's own renders of old hats.
+            uvs.append((t[0], t[1]))
         faces.append(tuple(tri))
     return MeshData(pos, nrm, uvs, faces, version)
 

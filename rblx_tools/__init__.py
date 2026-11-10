@@ -4,7 +4,7 @@
 bl_info = {
     "name": "RBLX Tools",
     "author": "RBLX-Tools contributors",
-    "version": (0, 2, 0),
+    "version": (0, 3, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Roblox, File > Import > Roblox, Add > Roblox",
     "description": "Import Roblox models, places and avatars; Roblox lighting, part properties "

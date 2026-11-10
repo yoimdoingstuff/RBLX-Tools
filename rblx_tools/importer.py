@@ -10,6 +10,7 @@ from . import assets, character, coords, geometry, lighting, materials
 from .props import suspend_updates
 from .rbx import CFrame, enums, load_file
 from .rbx import mesh as rbxmesh
+from .rbx.color import to_linear
 
 PART_CLASSES = {
     "Part", "MeshPart", "WedgePart", "CornerWedgePart", "TrussPart", "SpawnLocation", "Seat",
@@ -135,6 +136,13 @@ class Importer:
         self.scene.collection.children.link(self.collection)
 
         self.prefetch(doc)
+
+        # R6 body packages (CharacterMesh) turn body blocks into package meshes
+        for inst in list(doc.all_instances()):
+            if character.is_character(inst):
+                n = character.apply_character_meshes(inst, self.resolver)
+                if n:
+                    self.report.count("body package meshes", n)
 
         is_place = any(r.class_name in SERVICE_CLASSES for r in doc.roots)
         lighting_inst = None
@@ -340,6 +348,7 @@ class Importer:
         if not (isinstance(color, tuple) and len(color) == 3):
             bc = inst.get("BrickColor", "brickColor", default=194)
             color = enums.brick_color(bc if isinstance(bc, int) else 194)
+        color = to_linear(color)
         transparency = float(inst.get("Transparency", default=0.0) or 0.0)
         reflectance = float(inst.get("Reflectance", default=0.0) or 0.0)
         material_name = enums.MATERIALS.get(inst.get("Material", default=256), "Plastic")
@@ -388,7 +397,7 @@ class Importer:
                 moffset = tuple(special.get("Offset", default=(0.0, 0.0, 0.0)))
                 vc = special.get("VertexColor")
                 if isinstance(vc, tuple) and len(vc) == 3:
-                    texture_tint = tuple(min(max(c, 0.0), 1.0) for c in vc)
+                    texture_tint = to_linear(vc)
                 if special.class_name in ("SpecialMesh", "FileMesh"):
                     mtype = enums.MESH_TYPES.get(special.get("MeshType", default=5), "FileMesh")
                     if special.class_name == "FileMesh":
@@ -515,8 +524,7 @@ class Importer:
             return
         alpha_mode = sa.get("AlphaMode", default=0)
         tint = sa.get("Color", default=(1.0, 1.0, 1.0))
-        if not isinstance(tint, tuple):
-            tint = (1.0, 1.0, 1.0)
+        tint = to_linear(tint) if isinstance(tint, tuple) else (1.0, 1.0, 1.0)
         key = "%s %08x" % (sa.name, abs(hash(tuple(ids))) & 0xFFFFFFFF)
         obj.rblx.material_mode = "SURFACE"
         materials.assign(obj, materials.surface_appearance_material(
@@ -530,7 +538,7 @@ class Importer:
         face = enums.NORMAL_IDS.get(inst.get("Face", default=5), "FRONT")
         color = inst.get("Color3", "Color")
         color = color if isinstance(color, tuple) and len(color) == 3 else (1.0, 1.0, 1.0)
-        color = tuple(min(max(c, 0.0), 1.0) for c in color)
+        color = to_linear(color)
         transparency = min(max(float(inst.get("Transparency", default=0.0) or 0.0), 0.0), 1.0)
         if inst.class_name == "Texture":
             tiling = (float(inst.get("StudsPerTileU", default=2.0)),
@@ -551,7 +559,7 @@ class Importer:
         brightness = float(inst.get("Brightness", default=1.0))
         rng = float(inst.get("Range", default=8.0))
         color = inst.get("Color", default=(1.0, 1.0, 1.0))
-        color = color if isinstance(color, tuple) else (1.0, 1.0, 1.0)
+        color = to_linear(color if isinstance(color, tuple) else (1.0, 1.0, 1.0))
         face = enums.NORMAL_IDS.get(inst.get("Face", default=5), "FRONT")
         angle = float(inst.get("Angle", default=90.0))
 

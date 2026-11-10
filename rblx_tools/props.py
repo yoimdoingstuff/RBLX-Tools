@@ -236,7 +236,8 @@ def _studio_targets(obj):
 
 
 def _get_brick_color(self):
-    c = [v * 255.0 for v in self.color]
+    from .rbx.color import to_srgb
+    c = [v * 255.0 for v in to_srgb(self.color)]
     best, best_d = 0, None
     for i, (_n, rgb) in enumerate(BRICK_COLOR_NAMES):
         d = sum((a - b) ** 2 for a, b in zip(c, rgb))
@@ -246,8 +247,9 @@ def _get_brick_color(self):
 
 
 def _set_brick_color(self, value):
+    from .rbx.color import to_linear
     rgb = BRICK_COLOR_NAMES[value][1]
-    self.color = tuple(v / 255.0 for v in rgb)
+    self.color = to_linear(tuple(v / 255.0 for v in rgb))
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +311,10 @@ class RBLX_ObjectProps(bpy.types.PropertyGroup):
                               default=(4.0, 1.0, 2.0), min=0.001, soft_max=2048.0,
                               precision=3, update=_upd("size", _on_geometry),
                               description="Size in studs (Roblox axes: X, Y up, Z)")
+    bevel: FloatProperty(name="Bevel", min=0.0, soft_max=0.5, default=0.0, precision=3,
+                         update=_upd("bevel", _on_geometry),
+                         description="Round off the part's edges, in studs (block-like shapes). "
+                                     "Roblox's R6 body parts use 0.065")
     initial_size: FloatVectorProperty(name="Initial Size", size=3, default=(1.0, 1.0, 1.0),
                                       options={"HIDDEN"},
                                       description="Size of the mesh geometry at scale 1")
@@ -323,8 +329,10 @@ class RBLX_ObjectProps(bpy.types.PropertyGroup):
     brick_color: EnumProperty(name="BrickColor", items=BRICK_COLOR_ITEMS,
                               get=_get_brick_color, set=_set_brick_color,
                               description="Pick a named Roblox BrickColor (sets Color)")
+    # Colours are stored linear (Blender's colour space); Roblox's sRGB values
+    # are converted on import. The colour picker shows the same hex as Studio.
     color: FloatVectorProperty(name="Color", size=3, subtype="COLOR", min=0.0, max=1.0,
-                               default=(0.639, 0.635, 0.647),
+                               default=(0.366, 0.361, 0.376),  # Medium stone grey
                                update=_upd("color", _on_appearance))
     transparency: FloatProperty(name="Transparency", min=0.0, max=1.0, default=0.0,
                                 update=_upd("transparency", _on_appearance))

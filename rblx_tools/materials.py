@@ -364,14 +364,22 @@ def part_material(name):
 # ---------------------------------------------------------------------------
 # Texture layers
 
+def decal_wraps(obj, layer):
+    """Roblox draws Decals and Textures on mesh parts (MeshParts and
+    SpecialMesh file meshes) with the mesh's own UVs, ignoring Face, so they
+    wrap like TextureID. Only blocks and other basic shapes project onto a face."""
+    return layer.mapping in ("FACE", "TILED") and obj.rblx.shape == "MESH"
+
+
 def _layer_vector(nt, obj, layer, idx, x, y, shared):
     """Image coordinates for one layer; returns (vector socket, mask socket or None)."""
     r = obj.rblx
-    if layer.mapping in ("UV", "TEMPLATE"):
+    if layer.mapping in ("UV", "TEMPLATE") or decal_wraps(obj, layer):
         uv = nt.nodes.new("ShaderNodeUVMap")
         uv.location = (x - 250, y)
         name = "UVMap"
-        if layer.mapping == "TEMPLATE" and r.shape in ("BLOCK", "TRUSS"):
+        if layer.mapping == "TEMPLATE" and obj.type == "MESH" and \
+                obj.data.uv_layers.get("RBX_Template_" + layer.template_region) is not None:
             name = "RBX_Template_" + layer.template_region
         if obj.type == "MESH" and obj.data.uv_layers.get(name) is not None:
             uv.uv_map = name
@@ -483,10 +491,10 @@ def _build_layered(mat, obj):
     for idx, layer in enumerate(obj.rblx.layers):
         if not layer.enabled or layer.image is None:
             continue
-        if layer.mapping in ("FACE", "TILED") and shared is None:
+        if layer.mapping in ("FACE", "TILED") and not decal_wraps(obj, layer) and shared is None:
             shared = _shared_inputs(nt, obj)
         vec, mask = _layer_vector(nt, obj, layer, idx, x, y, shared)
-        ext = "REPEAT" if layer.mapping in ("UV", "TILED") else "CLIP"
+        ext = "REPEAT" if layer.mapping in ("UV", "TILED") or decal_wraps(obj, layer) else "CLIP"
         tex = _image_node(nt, layer.image, (x, y), extension=ext)
         _link(nt, vec, tex.inputs["Vector"])
 

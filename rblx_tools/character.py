@@ -9,6 +9,7 @@ from mathutils import Matrix
 
 from . import assets, coords, materials
 from .rbx import CFrame, Document, Instance, load_file
+from .rbx.color import to_linear
 
 R6_PARTS = ("Head", "Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg")
 
@@ -294,6 +295,7 @@ def apply_body_colors(imp, model_inst):
             col = brick_color(num) if isinstance(num, int) else None
         if col is None:
             continue
+        col = to_linear(col)
         for n in names:
             inst = parts.get(n)
             obj = imp.objects.get(id(inst)) if inst else None
@@ -302,9 +304,59 @@ def apply_body_colors(imp, model_inst):
                 obj.color = (*col, obj.color[3])
 
 
+# R15 body parts that share one clothing box (the template treats e.g. the
+# upper arm, lower arm and hand as one arm)
+R15_CLOTHING_GROUPS = {
+    "torso": ("UpperTorso", "LowerTorso"),
+    "left_arm": ("LeftUpperArm", "LeftLowerArm", "LeftHand"),
+    "right_arm": ("RightUpperArm", "RightLowerArm", "RightHand"),
+    "left_leg": ("LeftUpperLeg", "LeftLowerLeg", "LeftFoot"),
+    "right_leg": ("RightUpperLeg", "RightLowerLeg", "RightFoot"),
+}
+
+
+def set_clothing_boxes(imp, parts, scale=None, world_of=None):
+    """Store the box each mesh body part's clothing is projected from.
+    `imp` (an Importer) supplies scale and rest-pose matrices; without it pass
+    `scale` and `world_of(obj)`."""
+    from mathutils import Vector
+    from . import geometry
+    if imp is not None:
+        scale = imp.scale
+        world_of = imp.world.__getitem__
+
+    class _W:
+        def __getitem__(self, o):
+            return world_of(o)
+
+    world = _W()
+    for name, obj in parts.items():
+        if obj.rblx.shape in ("BLOCK", "TRUSS") or obj.type != "MESH":
+            continue
+        group = next((g for g in R15_CLOTHING_GROUPS.values() if name in g), None)
+        geometry.ensure_single_user_mesh(obj)
+        if group is None:
+            # R6 package mesh: the classic body part box (e.g. 1 x 2 x 1)
+            half = [s * scale / 2.0 for s in obj.rblx.size]
+            ratio = [s / i if i > 1e-6 else 1.0 for s, i in zip(obj.rblx.size, obj.rblx.initial_size)]
+            obj["rblx_template_box"] = [0.0, 0.0, 0.0] + [h / r for h, r in zip(half, ratio)]
+            continue
+        members = [parts[n] for n in group if n in parts and parts[n].type == "MESH"]
+        pts = [world[m] @ Vector(c) for m in members for c in m.bound_box]
+        lo = Vector([min(p[i] for p in pts) for i in range(3)])
+        hi = Vector([max(p[i] for p in pts) for i in range(3)])
+        inv = world[obj].inverted_safe()
+        c_local = inv @ ((lo + hi) / 2.0)
+        half_local = inv.to_3x3() @ ((hi - lo) / 2.0)
+        c_rbx = geometry._rbx(c_local)
+        h_rbx = geometry._rbx(half_local)
+        obj["rblx_template_box"] = list(c_rbx) + [abs(h_rbx.x), abs(h_rbx.y), abs(h_rbx.z)]
+
+
 def apply_clothing(imp, model_inst):
     parts = {d.name: imp.objects[id(d)] for d in model_inst.descendants()
              if id(d) in imp.objects and imp.objects[id(d)].rblx.kind == "PART"}
+    set_clothing_boxes(imp, parts)
     order = (("Pants", "PantsTemplate", PANTS_PARTS), ("Shirt", "ShirtTemplate", SHIRT_PARTS))
     for cls, prop, table in order:
         for c in model_inst.children:
@@ -313,25 +365,47 @@ def apply_clothing(imp, model_inst):
             content = c.props.get(prop)
             if not isinstance(content, str) or not content.strip():
                 continue
-            tint = c.props.get("Color3") if isinstance(c.props.get("Color3"), tuple) else (1, 1, 1)
+            tint = to_linear(c.props["Color3"]) if isinstance(c.props.get("Color3"), tuple) else (1, 1, 1)
             for part_name, region in table.items():
                 obj = parts.get(part_name)
                 if obj is None:
                     continue
                 imp.add_layer_from_content(obj, content, "TEMPLATE", c.name or cls, cls,
                                            color=tint, region=region)
+    # Body package overlay textures sit on top of the clothing
+    for ov in [d for d in model_inst.descendants() if d.class_name == "CharacterMeshOverlay"]:
+        obj = imp.objects.get(id(ov.parent))
+        content = ov.props.get("Texture")
+        if obj is not None and isinstance(content, str):
+            imp.add_layer_from_content(obj, content, "UV", "Package Overlay", "CharacterMesh")
     for c in model_inst.children:
         if c.class_name == "ShirtGraphic":
             content = c.props.get("Graphic")
             target = parts.get("Torso") or parts.get("UpperTorso")
             if isinstance(content, str) and content.strip() and target is not None:
-                tint = c.props.get("Color3") if isinstance(c.props.get("Color3"), tuple) else (1, 1, 1)
+                tint = to_linear(c.props["Color3"]) if isinstance(c.props.get("Color3"), tuple) else (1, 1, 1)
                 imp.add_layer_from_content(target, content, "FACE", c.name or "T-Shirt",
                                            "ShirtGraphic", color=tint, face="FRONT")
 
 
+R6_BEVEL = 0.065  # studs: the chamfer on Roblox's own R6 body part meshes
+R6_LIMBS = ("Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg")
+
+
+def smooth_r6_body(imp, model_inst):
+    """Give plain-block R6 body parts the rounded edges Roblox renders them with."""
+    from . import geometry
+    for d in model_inst.children:
+        if d.name in R6_LIMBS and id(d) in imp.objects:
+            obj = imp.objects[id(d)]
+            if obj.rblx.kind == "PART" and obj.rblx.shape == "BLOCK" and obj.rblx.bevel == 0.0:
+                obj.rblx.bevel = R6_BEVEL
+                geometry.rebuild_part(obj)
+
+
 def setup(imp, model_inst, model_obj):
     """Finish a character model after its parts were imported."""
+    smooth_r6_body(imp, model_inst)
     apply_body_colors(imp, model_inst)
     apply_clothing(imp, model_inst)
     model_obj["rblx_character"] = True
@@ -397,8 +471,27 @@ def build_r6_document(name="Rig"):
     return Document([model], "generated")
 
 
+def ground_model(model):
+    """Move a character so it stands on Y = 0, centred on its HumanoidRootPart
+    (Studio's rig files sit wherever they were saved)."""
+    parts = [d for d in model.descendants() if d.class_name in ("Part", "MeshPart")
+             and isinstance(d.props.get("CFrame"), CFrame)]
+    if not parts:
+        return
+    root = next((p for p in parts if p.name == "HumanoidRootPart"), parts[0])
+    bottom = min(p.props["CFrame"].pos[1] - abs(tuple(p.props.get("size", (0, 0, 0)))[1]) / 2.0
+                 for p in parts if p.name != "HumanoidRootPart")
+    rx, _ry, rz = root.props["CFrame"].pos
+    shift = CFrame((-rx, -bottom, -rz))
+    for p in parts:
+        p.props["CFrame"] = shift * p.props["CFrame"]
+    pivot = model.props.get("WorldPivotData")
+    if isinstance(pivot, CFrame):
+        model.props["WorldPivotData"] = shift * pivot
+
+
 def load_r15_document():
-    """Roblox Studio's own R15 rig (avatar/characterR15.rbxm)."""
+    """Roblox Studio's own R15 rig (avatar/characterR15.rbxm), standing at the origin."""
     path = assets.studio_file("avatar/characterR15.rbxm")
     if path is None:
         return None
@@ -407,6 +500,7 @@ def load_r15_document():
         if r.class_name == "Model":
             r.props["Name"] = "Rig"
             pose_from_joints(r)
+            ground_model(r)
             return doc
     return None
 
@@ -454,12 +548,16 @@ def _attachment_world(part, att):
     return part.props.get("CFrame", CFrame()) * att.props.get("CFrame", CFrame())
 
 
-def attach_accessory(model, accessory):
+def attach_accessory(model, accessory, adjust=None):
     """Position an Accessory's Handle on the body like Roblox does (matching
-    attachment names) and weld it to that body part."""
+    attachment names) and weld it to that body part. `adjust` is Roblox's
+    Accessory Adjustment: (position offset studs, rotation degrees, scale),
+    applied in the attachment's frame."""
     handle = accessory.find_first_child("Handle")
     if handle is None:
         return False
+    if adjust is not None and any(abs(v - 1.0) > 1e-6 for v in adjust[2]):
+        _scale_accessory(handle, adjust[2])
     hatt = next((c for c in handle.children if c.class_name == "Attachment"), None)
     parts = [d for d in model.descendants() if d.class_name in ("Part", "MeshPart")
              and d is not handle]
@@ -478,6 +576,9 @@ def attach_accessory(model, accessory):
         world = head.props.get("CFrame", CFrame()) * CFrame((0.0, 0.6, 0.0))
     else:
         world = _attachment_world(*target)
+    if adjust is not None:
+        world = world * CFrame(adjust[0], _rotation_from_orientation(adjust[1]))
+        accessory.props["RBXAdjusted"] = True
     if hatt is not None:
         handle.props["CFrame"] = world * hatt.props.get("CFrame", CFrame()).inverse()
     else:
@@ -551,6 +652,120 @@ def _apply_scales(model, scales):
                 att.props["CFrame"] = att.props["CFrame"].scaled_pos(*f)
 
 
+CHARACTER_MESH_PARTS = {0: "Head", 1: "Torso", 2: "Left Arm", 3: "Right Arm", 4: "Left Leg",
+                        5: "Right Leg"}
+
+
+def apply_character_meshes(model, resolver):
+    """R6 body packages: each CharacterMesh in the character swaps a body part
+    for the package's mesh (with its base texture under the clothing and its
+    overlay texture on top). Parts whose mesh can't be downloaded stay blocks."""
+    applied = 0
+    for cm in [d for d in model.descendants() if d.class_name == "CharacterMesh"]:
+        part_name = CHARACTER_MESH_PARTS.get(cm.props.get("BodyPart"))
+        part = model.find_first_child(part_name) if part_name else None
+        mesh_id = cm.props.get("MeshId")
+        if part is None or part.class_name != "Part" or not mesh_id:
+            continue
+        content = "rbxassetid://%s" % mesh_id
+        if not resolver.resolve_mesh(content):
+            continue
+        for c in list(part.children):
+            if c.class_name in ("SpecialMesh", "FileMesh", "BlockMesh", "CylinderMesh"):
+                c.remove()
+        sm = _new("SpecialMesh", "CharacterMesh", part, MeshType=5, MeshId=content,
+                  Scale=(1.0, 1.0, 1.0))
+        base = cm.props.get("BaseTextureId")
+        if base:
+            sm.props["TextureId"] = "rbxassetid://%s" % base
+        overlay = cm.props.get("OverlayTextureId")
+        if overlay:
+            _new("CharacterMeshOverlay", "Overlay", part, Texture="rbxassetid://%s" % overlay)
+        applied += 1
+    return applied
+
+
+def _rotation_from_orientation(deg):
+    """Like CFrame.fromOrientation(rx, ry, rz): Y, then X, then Z (degrees)."""
+    import math
+    rx, ry, rz = (math.radians(a) for a in deg)
+    cx, sx, cy, sy, cz, sz = (math.cos(rx), math.sin(rx), math.cos(ry), math.sin(ry),
+                              math.cos(rz), math.sin(rz))
+    X = CFrame(rot=(1, 0, 0, 0, cx, -sx, 0, sx, cx))
+    Y = CFrame(rot=(cy, 0, sy, 0, 1, 0, -sy, 0, cy))
+    Z = CFrame(rot=(cz, -sz, 0, sz, cz, 0, 0, 0, 1))
+    return (Y * X * Z).rot
+
+
+def accessory_adjustment(asset):
+    """Accessory Adjustment (position/rotation/scale) from an avatar API asset
+    entry, or None. Accepts the field spellings Roblox's APIs use."""
+    meta = asset.get("meta") if isinstance(asset.get("meta"), dict) else {}
+
+    def vec(names, default):
+        for n in names:
+            v = meta.get(n)
+            if isinstance(v, dict):
+                return tuple(float(v.get(a, v.get(a.lower(), d))) for a, d in zip("XYZ", default))
+            if isinstance(v, (list, tuple)) and len(v) == 3:
+                return tuple(float(x) for x in v)
+        return default
+
+    pos = vec(("position", "Position"), (0.0, 0.0, 0.0))
+    rot = vec(("rotation", "Rotation"), (0.0, 0.0, 0.0))
+    scale = vec(("scale", "Scale"), (1.0, 1.0, 1.0))
+    if pos == (0.0, 0.0, 0.0) and rot == (0.0, 0.0, 0.0) and scale == (1.0, 1.0, 1.0):
+        return None
+    return pos, rot, scale
+
+
+def _scale_accessory(handle, s):
+    for k in ("size",):
+        if isinstance(handle.props.get(k), tuple):
+            handle.props[k] = tuple(a * b for a, b in zip(handle.props[k], s))
+    for c in handle.children:
+        if c.class_name in ("SpecialMesh", "FileMesh"):
+            c.props["Scale"] = tuple(a * b for a, b in zip(c.props.get("Scale", (1, 1, 1)), s))
+            c.props["Offset"] = tuple(a * b for a, b in zip(c.props.get("Offset", (0, 0, 0)), s))
+        elif c.class_name == "Attachment" and isinstance(c.props.get("CFrame"), CFrame):
+            c.props["CFrame"] = c.props["CFrame"].scaled_pos(*s)
+
+
+def _drop_classic_face(head):
+    """Dynamic heads have their face in the head texture; remove the Decal face."""
+    for c in list(head.children):
+        if c.class_name == "Decal" and c.name.lower() == "face":
+            c.remove()
+
+
+def apply_head_mesh(head, sm, resolver):
+    """Use a head asset's SpecialMesh (classic or dynamic head) on the Head.
+    Only switches when the mesh file is available, so the classic head stays
+    if it can't be downloaded. Returns True if applied."""
+    mesh_id = sm.get("MeshId", "MeshID", default="")
+    if not isinstance(mesh_id, str) or not resolver.resolve_mesh(mesh_id):
+        return False
+    old = head.find_first_child_of_class("SpecialMesh")
+    if old is not None:
+        old.remove()
+    # Head assets carry their attachment positions as Vector3Values
+    for v in [c for c in sm.children if c.class_name == "Vector3Value" and c.name.endswith("Attachment")]:
+        pos = v.props.get("Value")
+        if not isinstance(pos, tuple):
+            continue
+        att = head.find_first_child(v.name)
+        if att is None or att.class_name != "Attachment":
+            att = _new("Attachment", v.name, head)
+        cf = att.props.get("CFrame") if isinstance(att.props.get("CFrame"), CFrame) else CFrame()
+        att.props["CFrame"] = CFrame(pos, cf.rot)
+    sm.remove()
+    head.add_child(sm)
+    tex = sm.get("TextureId", "TextureID", default="")
+    if isinstance(tex, str) and tex.strip() and resolver.resolve_image(tex):
+        _drop_classic_face(head)
+    return True
+
+
 def build_avatar_document(name_or_id, resolver, report, rig_type="AUTO"):
     """Assemble a user's avatar as a Roblox document. Clothing, faces and
     accessories need asset downloads (Open Cloud API key)."""
@@ -588,56 +803,102 @@ def build_avatar_document(name_or_id, resolver, report, rig_type="AUTO"):
     head = model.find_first_child("Head")
     asset_list = av.get("assets") or []
     resolver.prefetch(["rbxassetid://%s" % a["id"] for a in asset_list])
-    for a in asset_list:
+    needs_login = []  # names of items whose files couldn't be downloaded
+
+    def missing(a, what=""):
+        needs_login.append((a.get("name") or str(a.get("id"))) + what)
+
+    # Heads and body parts first, so accessories attach to the final head/body
+    head_types = set(BODY_PART_TYPES) | {17, 79}
+    body_final = [False]
+
+    def finish_body():
+        # R15 scaling/posing must happen before accessories are attached
+        if body_final[0]:
+            return
+        body_final[0] = True
+        if avatar_type == "R15":
+            _apply_scales(model, av.get("scales") or {})
+            _sync_motors_to_attachments(model)
+            pose_from_joints(model)
+
+    def order(a):
+        t = (a.get("assetType") or {}).get("id")
+        return 0 if t in head_types else (2 if t in ACCESSORY_TYPES else 1)
+
+    for a in sorted(asset_list, key=order):
         aid = a.get("id")
         tid = (a.get("assetType") or {}).get("id")
         content = "rbxassetid://%s" % aid
-        if tid == 11:
-            _new("Shirt", "Shirt", model, ShirtTemplate=content)
-        elif tid == 12:
-            _new("Pants", "Pants", model, PantsTemplate=content)
-        elif tid == 2:
-            _new("ShirtGraphic", "Shirt Graphic", model, Graphic=content)
+        if tid in ACCESSORY_TYPES:
+            finish_body()
+        if tid in (11, 12, 2):
+            cls, prop, label = {11: ("Shirt", "ShirtTemplate", "Shirt"),
+                                12: ("Pants", "PantsTemplate", "Pants"),
+                                2: ("ShirtGraphic", "Graphic", "Shirt Graphic")}[tid]
+            _new(cls, label, model, **{prop: content})
+            if resolver.resolve_image(content) is None:
+                missing(a)
         elif tid == 18 and head is not None:
             face = head.find_first_child("face") or _new("Decal", "face", head, Face=5)
             face.props["Texture"] = content
+            if resolver.resolve_image(content) is None:
+                missing(a)
         elif tid in ACCESSORY_TYPES:
             adoc = _download_model(resolver, aid, report)
             if adoc is None:
+                missing(a)
                 continue
+            adjust = accessory_adjustment(a)
+            if adjust is not None:
+                report.count("adjusted accessories")
             for inst in adoc.all_instances():
                 if inst.class_name in ("Accessory", "Accoutrement", "Hat"):
                     inst.remove()
-                    if not attach_accessory(model, inst):
+                    if not attach_accessory(model, inst, adjust):
                         report.warnings.append("Couldn't attach accessory %s" % a.get("name"))
                     break
-        elif tid in BODY_PART_TYPES or tid in (17, 79):
+        elif tid in head_types:
             pdoc = _download_model(resolver, aid, report)
             if pdoc is None:
+                missing(a)
                 continue
-            if avatar_type == "R15":
-                folder = None
-                for fname in ("R15ArtistIntent", "R15Fixed", "R15"):
-                    folder = next((i for i in pdoc.all_instances()
-                                   if i.class_name == "Folder" and i.name == fname), None)
-                    if folder is not None:
-                        break
-                parts = folder.children if folder is not None else [
-                    i for i in pdoc.all_instances() if i.class_name == "MeshPart"]
-                for p in parts:
-                    if p.class_name == "MeshPart":
+            folder = None
+            for fname in ("R15ArtistIntent", "R15Fixed", "R15"):
+                folder = next((i for i in pdoc.all_instances()
+                               if i.class_name == "Folder" and i.name == fname), None)
+                if folder is not None:
+                    break
+            meshparts = [p for p in (folder.children if folder is not None else pdoc.all_instances())
+                         if p.class_name == "MeshPart"]
+            sm = next((i for i in pdoc.all_instances() if i.class_name == "SpecialMesh"), None)
+            r6_meshes = [i for i in pdoc.all_instances() if i.class_name == "CharacterMesh"]
+            if avatar_type == "R6" and r6_meshes and tid in BODY_PART_TYPES:
+                for cm in r6_meshes:
+                    if resolver.resolve_mesh("rbxassetid://%s" % cm.props.get("MeshId")):
+                        cm.remove()
+                        model.add_child(cm)
+                    else:
+                        missing(a, " (R6 mesh)")
+            elif avatar_type == "R15" and meshparts:
+                for p in meshparts:
+                    if resolver.resolve_mesh(p.get("MeshId", "MeshID", default="")):
                         _replace_body_part(model, p)
-            if tid == 17 and head is not None:
-                sm = next((i for i in pdoc.all_instances() if i.class_name == "SpecialMesh"), None)
-                if sm is not None:
-                    old = head.find_first_child_of_class("SpecialMesh")
-                    if old is not None:
-                        old.remove()
-                    sm.remove()
-                    head.add_child(sm)
+                    else:
+                        missing(a, " (%s mesh)" % p.name)
+            elif sm is not None and head is not None and tid in (17, 79):
+                if not apply_head_mesh(head, sm, resolver):
+                    missing(a, " (head mesh)")
+            elif meshparts and head is not None and tid in (17, 79):
+                hp = next((p for p in meshparts if p.name == "Head"), meshparts[0])
+                if resolver.resolve_mesh(hp.get("MeshId", "MeshID", default="")):
+                    hp.props["Name"] = "Head"
+                    _replace_body_part(model, hp)
+                    _drop_classic_face(head)
+                else:
+                    missing(a, " (head mesh)")
+    report.avatar_needs_login = needs_login
 
-    if avatar_type == "R15":
-        _apply_scales(model, av.get("scales") or {})
-        _sync_motors_to_attachments(model)
-        pose_from_joints(model)
+    finish_body()
+    ground_model(model)
     return doc, user_name, avatar_type

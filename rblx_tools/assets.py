@@ -12,7 +12,7 @@ import re
 import bpy
 
 from . import prefs
-from .download import Downloader, sniff_extension
+from .download import LIBRARY_SUBFOLDERS, Downloader, library_subfolder, sniff_extension
 
 _ID_PATTERNS = (
     re.compile(r"rbxassetid://(\d+)", re.I),
@@ -90,12 +90,63 @@ def studio_file(rel):
 
 # ---------------------------------------------------------------------------
 
-def cache_dir():
+def _default_library_dir():
     try:
-        return bpy.utils.extension_path_user(__package__, path="asset_cache", create=True)
+        return bpy.utils.extension_path_user(__package__, path="asset_library", create=True)
     except (ValueError, AttributeError, TypeError):
-        return bpy.utils.user_resource("DATAFILES", path=os.path.join("rblx_tools", "asset_cache"),
+        return bpy.utils.user_resource("DATAFILES", path=os.path.join("rblx_tools", "asset_library"),
                                        create=True)
+
+
+def _migrate_old_cache(lib):
+    """Version 0.2 kept downloads in one flat 'asset_cache' folder: sort them
+    into the library's meshes/textures/models folders."""
+    try:
+        old = bpy.utils.extension_path_user(__package__, path="asset_cache", create=False)
+    except (ValueError, AttributeError, TypeError):
+        return
+    if not old or not os.path.isdir(old) or os.path.normcase(old) == os.path.normcase(lib):
+        return
+    import shutil
+    for fn in os.listdir(old):
+        src = os.path.join(old, fn)
+        if not os.path.isfile(src) or fn.endswith(".part"):
+            continue
+        ext = os.path.splitext(fn)[1].lower() or sniff_extension(_read_head(src))
+        dst_dir = os.path.join(lib, library_subfolder(ext))
+        os.makedirs(dst_dir, exist_ok=True)
+        try:
+            shutil.move(src, os.path.join(dst_dir, fn))
+        except OSError:
+            pass
+    try:
+        os.rmdir(old)
+    except OSError:
+        pass
+
+
+def library_dir():
+    """Where downloaded meshes/textures/models are kept for future imports."""
+    p = prefs.get()
+    if p is not None and p.library_folder.strip():
+        d = os.path.normpath(bpy.path.abspath(p.library_folder.strip()))
+        os.makedirs(d, exist_ok=True)
+    else:
+        d = _default_library_dir()
+    _migrate_old_cache(d)
+    return d
+
+
+cache_dir = library_dir  # older name
+
+
+def library_stats(d=None):
+    d = d or library_dir()
+    stats = {}
+    for sub in LIBRARY_SUBFOLDERS:
+        p = os.path.join(d, sub)
+        stats[sub] = len([f for f in os.listdir(p) if not f.endswith(".part")]) if os.path.isdir(p) else 0
+    return stats
 
 
 def online_allowed():
@@ -228,15 +279,37 @@ class AssetResolver:
 
 
 def make_downloader():
-    """Downloader from the add-on preferences, or (None, reason)."""
+    """(Downloader, note) from the add-on preferences. The downloader is None
+    when downloading isn't possible; the note explains limits either way."""
     p = prefs.get()
-    if p is None or not p.api_key.strip():
-        return None, "No Roblox Open Cloud API key set (add-on preferences)"
-    if not p.download_assets:
+    if p is not None and not p.download_assets:
         return None, "Downloading is turned off in the add-on preferences"
     if not online_allowed():
         return None, "Blender's online access is off (Preferences > System > Network)"
-    return Downloader(p.api_key, cache_dir()), None
+    key = p.api_key if p is not None else ""
+    cookie = prefs.get_cookie()
+    anonymous = p.allow_anonymous if p is not None else True
+    d = Downloader(library_dir(), key, cookie, anonymous)
+    if not d.method_names():
+        return None, "No API key or .ROBLOSECURITY cookie set (add-on preferences)"
+    note = None
+    if not key.strip() and not cookie.strip():
+        note = ("No API key or cookie set: only Roblox-made assets can download "
+                "(add one in the add-on preferences)")
+    return d, note
+
+
+def describe_access():
+    """Short status line for the UI."""
+    p = prefs.get()
+    parts = []
+    if p is not None and p.api_key.strip():
+        parts.append("API key")
+    if prefs.get_cookie().strip():
+        parts.append("cookie" + ("" if (p is not None and p.remember_cookie) else " (this session)"))
+    if not parts:
+        return "Roblox-made assets only (no key/cookie)"
+    return "Downloads with: " + ", ".join(parts)
 
 
 def default_resolver(extra_folder=None, allow_download=True):

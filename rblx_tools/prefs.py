@@ -5,19 +5,75 @@ ADDON_ID = __package__
 
 API_KEY_URL = "https://create.roblox.com/dashboard/credentials"
 
+# The .ROBLOSECURITY cookie is kept only in memory unless the user chooses to
+# remember it. A get/set property backed by this variable is never saved to a
+# .blend or preferences file.
+_session_cookie = ""
+
+
+def _get_session_cookie(self):
+    return _session_cookie
+
+
+def _set_session_cookie(self, value):
+    global _session_cookie
+    _session_cookie = value or ""
+
+
+def _on_remember(self, context):
+    global _session_cookie
+    if self.remember_cookie:
+        if _session_cookie and not self.cookie:
+            self.cookie = _session_cookie
+        _session_cookie = ""
+    else:
+        if self.cookie:
+            _session_cookie = self.cookie
+        self.cookie = ""
+
+
+def get_cookie():
+    p = get()
+    if p is not None and p.remember_cookie:
+        return p.cookie or ""
+    return _session_cookie
+
+
+def cookie_owner():
+    """(data, property name) to draw the cookie field with."""
+    p = get()
+    if p is not None and p.remember_cookie:
+        return p, "cookie"
+    return bpy.context.window_manager, "rblx_session_cookie"
+
 
 class RBLX_AddonPreferences(bpy.types.AddonPreferences):
     bl_idname = ADDON_ID
 
     api_key: StringProperty(
         name="Open Cloud API Key", subtype="PASSWORD", default="",
-        description="Your own Roblox Open Cloud API key, used to download meshes and images. "
+        description="Your own Roblox Open Cloud API key, used to download meshes and textures. "
                     "Create one at create.roblox.com > Dashboard > Credentials with the "
                     "legacy-asset:manage permission. Stored in your Blender preferences")
+    cookie: StringProperty(
+        name=".ROBLOSECURITY", subtype="PASSWORD", default="",
+        description="Saved copy of your .ROBLOSECURITY cookie (only when Remember is on)")
+    remember_cookie: BoolProperty(
+        name="Remember Cookie", default=False, update=_on_remember,
+        description="Save the cookie in your Blender preferences (plain text on this computer). "
+                    "Off: it's forgotten when Blender closes")
+    allow_anonymous: BoolProperty(
+        name="Try Without Login", default=True,
+        description="Also try downloading without credentials. Works for Roblox-made assets "
+                    "(default body meshes, many built-in textures)")
     download_assets: BoolProperty(
         name="Download Missing Assets", default=True,
-        description="Download meshes and images that aren't on disk yet (needs an API key and "
-                    "Blender's online access)")
+        description="Download meshes and textures that aren't on disk yet (needs Blender's online "
+                    "access)")
+    library_folder: StringProperty(
+        name="Asset Library", subtype="DIR_PATH", default="",
+        description="Where downloaded meshes, textures and models are saved for future use "
+                    "(sorted into meshes/, textures/, models/). Empty: the add-on's own folder")
     asset_folder: StringProperty(
         name="Asset Folder", subtype="DIR_PATH", default="",
         description="Optional folder with Roblox assets you've saved yourself (images, .mesh "
@@ -36,26 +92,10 @@ class RBLX_AddonPreferences(bpy.types.AddonPreferences):
                     "Studio install")
 
     def draw(self, context):
+        draw_download_settings(self.layout, context, full=True)
+
         from . import assets, draco
-        layout = self.layout
-
-        box = layout.box()
-        box.label(text="Downloading meshes & images", icon="URL")
-        col = box.column()
-        col.prop(self, "api_key")
-        col.prop(self, "download_assets")
-        row = col.row()
-        row.operator("wm.url_open", text="Create an API key", icon="URL").url = API_KEY_URL
-        col.label(text="Give the key the 'legacy-asset:manage' permission (Assets API).")
-        if not assets.online_allowed():
-            warn = col.column()
-            warn.alert = True
-            warn.label(text="Blender's online access is off: Preferences > System > Network",
-                       icon="ERROR")
-        col.label(text="Cache: " + assets.cache_dir(), icon="FILE_FOLDER")
-        col.operator("rblx.clear_cache", icon="TRASH")
-
-        box = layout.box()
+        box = self.layout.box()
         box.label(text="Local files", icon="FILE_FOLDER")
         col = box.column()
         col.prop(self, "asset_folder")
@@ -70,6 +110,59 @@ class RBLX_AddonPreferences(bpy.types.AddonPreferences):
                   icon="CHECKMARK" if draco.available() else "ERROR")
 
 
+def draw_download_settings(layout, context, full=False):
+    """Shared by the preferences and the sidebar panel."""
+    from . import assets
+    p = get()
+    if p is None:
+        return
+    box = layout.box()
+    box.label(text="Downloading meshes & textures", icon="URL")
+    col = box.column()
+    col.label(text=assets.describe_access(), icon="INFO")
+
+    col.label(text="1. Open Cloud API key (recommended)")
+    col.prop(p, "api_key", text="API Key")
+    col.operator("wm.url_open", text="Create an API key", icon="URL").url = API_KEY_URL
+    if full:
+        col.label(text="   Give it the 'legacy-asset:manage' permission (Assets API).")
+
+    col.separator()
+    col.label(text="2. Or your .ROBLOSECURITY cookie")
+    owner, prop = cookie_owner()
+    col.prop(owner, prop, text="Cookie")
+    col.prop(p, "remember_cookie")
+    warn = col.column()
+    warn.scale_y = 0.8
+    warn.label(text="Never share your cookie:", icon="ERROR")
+    warn.label(text="it gives full access to your account.")
+    if full:
+        warn.label(text="It's only sent to assetdelivery.roblox.com. Roblox recommends API keys;")
+        warn.label(text="cookie downloads may stop working if Roblox removes them.")
+
+    col.separator()
+    col.prop(p, "allow_anonymous")
+    col.prop(p, "download_assets")
+    if not assets.online_allowed():
+        w = col.column()
+        w.alert = True
+        w.label(text="Blender's online access is off: Preferences > System > Network",
+                icon="ERROR")
+    col.operator("rblx.test_download", icon="IMPORT")
+
+    box = layout.box()
+    box.label(text="Asset library (downloads are kept here)", icon="ASSET_MANAGER")
+    col = box.column()
+    col.prop(p, "library_folder", text="")
+    lib = assets.library_dir()
+    stats = assets.library_stats(lib)
+    col.label(text="%d meshes, %d textures, %d models" % (stats["meshes"], stats["textures"],
+                                                           stats["models"]))
+    row = col.row(align=True)
+    row.operator("wm.path_open", text="Open Folder", icon="FILE_FOLDER").filepath = lib
+    row.operator("rblx.clear_cache", text="Clear", icon="TRASH")
+
+
 def get():
     try:
         return bpy.context.preferences.addons[ADDON_ID].preferences
@@ -79,7 +172,12 @@ def get():
 
 def register():
     bpy.utils.register_class(RBLX_AddonPreferences)
+    bpy.types.WindowManager.rblx_session_cookie = StringProperty(
+        name=".ROBLOSECURITY", subtype="PASSWORD", get=_get_session_cookie,
+        set=_set_session_cookie, options={"SKIP_SAVE"},
+        description="Your .ROBLOSECURITY cookie, kept in memory for this Blender session only")
 
 
 def unregister():
+    del bpy.types.WindowManager.rblx_session_cookie
     bpy.utils.unregister_class(RBLX_AddonPreferences)

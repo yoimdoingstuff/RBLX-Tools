@@ -115,6 +115,8 @@ def _draw_part(layout, context, obj):
     else:
         col.label(text="Shape: " + dict((s[0], s[1]) for s in SHAPE_ITEMS)[r.shape])
     col.prop(r, "size")
+    if r.shape in ("BLOCK", "TRUSS", "WEDGE", "CORNER_WEDGE"):
+        col.prop(r, "bevel")
     if _scale_mismatch(obj):
         warn = col.column()
         warn.alert = True
@@ -220,13 +222,16 @@ def draw_textures(layout, context, obj):
         warn.alert = True
         warn.label(text="Image not found: " + (layer.source or "?"), icon="ERROR")
     col.prop(layer, "mapping")
-    if layer.mapping in ("FACE", "TILED"):
+    if layer.mapping in ("FACE", "TILED") and r.shape == "MESH":
+        col.label(text="On meshes, Roblox wraps Decals/Textures", icon="INFO")
+        col.label(text="with the mesh's UVs (Face is ignored).")
+    elif layer.mapping in ("FACE", "TILED"):
         col.prop(layer, "face")
     if layer.mapping == "TEMPLATE" and r.shape in ("BLOCK", "TRUSS"):
         col.prop(layer, "template_region")
     col.prop(layer, "color")
     col.prop(layer, "transparency", slider=True)
-    if layer.mapping == "TILED":
+    if layer.mapping == "TILED" and r.shape != "MESH":
         sub = col.column(align=True)
         sub.prop(layer, "studs_per_tile_u")
         sub.prop(layer, "studs_per_tile_v")
@@ -381,21 +386,7 @@ class RBLX_PT_import(_RBLXPanel, bpy.types.Panel):
         layout.prop(context.scene.rblx, "stud_scale")
 
         p = prefs.get()
-        col = _section(layout, "Downloads", "URL")
-        if p is not None:
-            if p.api_key.strip():
-                col.label(text="API key set", icon="CHECKMARK")
-            else:
-                warn = col.column()
-                warn.alert = True
-                warn.label(text="No API key: meshes/images can't download", icon="ERROR")
-            col.prop(p, "api_key", text="Key")
-            col.operator("wm.url_open", text="Create an API key",
-                         icon="URL").url = prefs.API_KEY_URL
-            if not assets.online_allowed():
-                warn = col.column()
-                warn.alert = True
-                warn.label(text="Online access is off in Blender", icon="ERROR")
+        prefs.draw_download_settings(layout, context)
         col = _section(layout, "Local Files", "FILE_FOLDER")
         if p is not None:
             col.prop(p, "asset_folder", text="")

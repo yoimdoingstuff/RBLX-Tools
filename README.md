@@ -19,9 +19,12 @@ Tested on Blender 5.2. Needs Blender 4.2 or newer.
   - Models and Folders become empties at the model's pivot. Decals, Textures,
     SurfaceAppearance and lights are imported too.
   - Place files also bring in their Lighting settings.
-- **Downloading assets**: meshes and images are downloaded automatically
-  through Roblox Open Cloud with your own API key (see below). They're cached,
-  so each asset is only downloaded once.
+- **Downloading assets**: meshes, textures and models are downloaded
+  automatically with your own API key or `.ROBLOSECURITY` cookie (see below).
+  Roblox-made assets, like the default body meshes, download with no login at
+  all. Everything downloaded is kept in the **asset library**
+  (`meshes/`, `textures/`, `models/`), so it's reused by later imports, even
+  offline.
 - **Characters**
   - Any Model with a Humanoid becomes a **rigged character**. An armature is
     built from its Motor6D joints, and each body part follows its bone, so you
@@ -30,7 +33,20 @@ Tested on Blender 5.2. Needs Blender 4.2 or newer.
   - **Add > Roblox > R6 / R15 Character** inserts a ready-to-animate rig. R6
     works offline; R15 uses the rig from your Roblox Studio install.
   - **Avatar from Username**: imports anyone's avatar as a rigged R6 or R15
-    character, with body colors, clothing, face, body parts and accessories.
+    character, with skin tone, clothing, classic or dynamic head and face, body
+    parts and accessories.
+    - Most of those items are creator uploads, which Roblox only lets you
+      download with a login, so set an API key or cookie (see below).
+    - Without one you get the body, skin tone, Roblox-made items, and the
+      classic head and face. The import names every item it couldn't download.
+  - **Body packages**: R15 body parts and R6 packages (CharacterMesh) replace
+    the default body, with base and overlay textures.
+  - **Accessory Adjustment**: an avatar's adjusted accessory position,
+    rotation and scale are applied. This follows Roblox's documented
+    Position/Rotation/Scale but hasn't been checked against an adjusted avatar
+    yet.
+  - R6 body parts get the same rounded edges Roblox gives them. Any block can
+    use this through the part's **Bevel** property.
 - **Studio-style properties** (Sidebar > Roblox > Properties, and Properties
   Editor > Object > Roblox):
   - Grouped like Studio: Appearance (BrickColor, CastShadow, Color, Material,
@@ -80,27 +96,57 @@ Tested on Blender 5.2. Needs Blender 4.2 or newer.
    choose **Install from Disk...**. Pick the zip.
 3. Open the sidebar in the 3D view (N) and select the **Roblox** tab.
 
-## Getting meshes and images (API key)
+## Getting meshes and textures
 
 Roblox files only store asset ids like `rbxassetid://12345678`, not the actual
-meshes and images. Since April 2025 Roblox only gives asset files to
-authenticated requests, so the addon uses **your own Open Cloud API key**:
+meshes and textures. Since April 2025 Roblox only gives most asset files to
+logged-in requests. The addon tries these in order and falls back to the next
+one if an asset is refused:
 
-1. Go to <https://create.roblox.com/dashboard/credentials> and choose
-   **Create API Key**.
-2. Add the **Assets** API system with the `legacy-asset:manage` permission
-   (read access is all that's used). Set accepted IP addresses to `0.0.0.0/0`
-   or your own IP.
-3. Paste the key into Edit > Preferences > Add-ons > RBLX Tools > **Open Cloud
-   API Key**, or into Sidebar > Roblox > Import & Assets.
-4. Make sure Blender's **Allow Online Access** is on (Preferences > System >
-   Network).
+1. **Open Cloud API key** (what Roblox recommends):
+   1. Go to <https://create.roblox.com/dashboard/credentials> and choose
+      **Create API Key**.
+   2. Add the **Assets** API system with the `legacy-asset:manage`
+      permission (only reading is used). Set accepted IP addresses to your
+      own IP, or `0.0.0.0/0`.
+   3. Paste the key into Sidebar > Roblox > Import & Assets, or Edit >
+      Preferences > Add-ons > RBLX Tools. The key is saved in your Blender
+      preferences and only sent to `apis.roblox.com`.
+2. **Your `.ROBLOSECURITY` cookie**: paste it into the **Cookie** field (with
+   or without the `.ROBLOSECURITY=` part).
+   - By default it's kept **in memory only** and forgotten when Blender
+     closes. It's never written to your .blend files or preferences.
+   - Tick **Remember Cookie** to save it in your Blender preferences (plain
+     text on your computer).
+   - It's only sent to `assetdelivery.roblox.com`.
+   - **Never share your cookie**: anyone who has it can log in as you. If it
+     leaks, log out of all sessions on roblox.com to invalidate it.
+   - Roblox discourages cookie access for tools and may turn it off, which is
+     why the API key is tried first.
+3. **No login**: Roblox-made assets (default body meshes, many built-in
+   textures) download without any credentials.
 
-The key is stored in your Blender preferences and only sent to
-`apis.roblox.com`. Downloaded files go to the cache folder shown in the
-preferences (you can clear it there).
+Also make sure Blender's **Allow Online Access** is on (Preferences > System >
+Network). **Test Download** fetches one asset id and tells you which method
+worked.
 
-Without a key, the addon still uses:
+### Asset library
+
+Everything downloaded is saved for future use:
+
+| Folder | What's in it |
+| --- | --- |
+| `meshes/` | `.mesh` files (MeshPart / SpecialMesh meshes) |
+| `textures/` | `.png`, `.jpg`, `.webp`, ... (TextureIDs, Decals, clothing, faces) |
+| `models/` | `.rbxm` / `.rbxmx` (Decal, Shirt, Pants and accessory assets) |
+| `other/` | anything else |
+
+Files are named by asset id, e.g. `textures/6023426923.png`, and any import
+that needs them uses them without downloading again. By default the library is
+in the addon's own user folder. You can pick another folder in the settings,
+use **Open Folder** to browse it, or **Clear** to empty it.
+
+Without downloads, the addon still uses:
 - **Asset Folder**: files you've saved yourself, named by asset id. For example
   `12345678.png`, `12345678.mesh`, or `Sword_12345678.mesh`. Subfolders are
   searched too, and files don't need an extension.
@@ -109,7 +155,8 @@ Without a key, the addon still uses:
   Bloxstrap-style launchers (Bloxstrap, Fishstrap, Voidstrap).
 
 Anything still missing is listed in **Text Editor > RBX Import Report**, with
-the reason:
+the reason (for example "Authentication required" when no key or cookie
+worked):
 - Missing meshes import as boxes of the right size.
 - Missing images import as empty layers.
 
@@ -124,6 +171,8 @@ the reason:
   properties panel always shows Roblox values.
 - A Roblox part's front (-Z, its LookVector) faces Blender's front view, so
   numpad 1 looks a character in the face.
+- Colors are converted from Roblox's sRGB to Blender's linear color. Values
+  are stored linear, and the color picker's hex matches Studio's.
 
 ## Known limitations
 

@@ -47,10 +47,15 @@ import rblx_tools
 from rblx_tools import assets as A, character as CH, importer as I, materials as M
 from rblx_tools import operators as OPS, draco
 from rblx_tools.rbx import CFrame, mesh as rbxmesh
+from rblx_tools.rbx.color import to_linear
 
 rblx_tools.register()
 scene = bpy.context.scene
 print("registered")
+
+# Keep the test's asset library out of the real Blender config
+TEST_LIBRARY = os.path.join(SCRATCH, "library")
+A._default_library_dir = lambda: (os.makedirs(TEST_LIBRARY, exist_ok=True), TEST_LIBRARY)[1]
 
 
 def select_only(*objs):
@@ -111,7 +116,8 @@ check(close(p.dimensions, (6.0, 2.0, 2.0), 1e-2), "Cylinder runs along X: dims %
 p.rblx.material = "Neon"
 check(p.material_slots[0].material.name == "RBX Neon", "Material switch -> RBX Neon")
 p.rblx.brick_color = "7"  # Bright red
-check(close(p.rblx.color, (196 / 255, 40 / 255, 28 / 255)), "BrickColor picker sets Color")
+check(close(p.rblx.color, to_linear((196 / 255, 40 / 255, 28 / 255))) and p.rblx.brick_color == "7",
+      "BrickColor picker sets Color (stored linear) and reads back")
 p.rblx.color = (1.0, 0.0, 0.0)
 p.rblx.transparency = 0.25
 check(close(p.color, (1.0, 0.0, 0.0, 0.75)), "obj.color synced %s" % T(p.color))
@@ -278,13 +284,26 @@ check(("Decal", "FACE", "FRONT", True) in names and ("Texture", "TILED", "BACK",
       "Decal + Texture became layers on the wall: %s" % names)
 check(wall.rblx.material_mode == "LAYERED" and wall.material_slots[0].material.get("rblx_layered"),
       "Wall got a layered material")
-check(close(roof.rblx.color, (196 / 255, 40 / 255, 28 / 255)) and roof.rblx.shape == "WEDGE",
-      "Roof: BrickColor 21 wedge")
+check(close(roof.rblx.color, to_linear((196 / 255, 40 / 255, 28 / 255))) and roof.rblx.shape == "WEDGE",
+      "Roof: BrickColor 21 wedge (Roblox sRGB colour converted to linear)")
+fog = O.get("RBX Fog Volume")
+check(fog is not None and not fog.hide_render and not fog.visible_shadow,
+      "Fog is a volume box that doesn't block sunlight")
 check(close(roof.rblx.orientation, (0, 90, 0), 1e-2), "Roof orientation %s" % T(roof.rblx.orientation))
 check(gem.rblx.shape == "MESH" and len(gem.data.polygons) == 4, "MeshPart .mesh v2 loaded")
 check(close(gem.dimensions, (4, 4, 4), 1e-2), "MeshPart scaled to Size: %s" % T(gem.dimensions))
 check(any(l.kind == "TextureID" and l.mapping == "UV" and l.image for l in gem.rblx.layers),
       "MeshPart TextureID -> UV texture layer")
+# Decals on meshes wrap with the mesh UVs (Roblox ignores Face there)
+hl = M.add_layer(gem, M.load_image(os.path.join(assets_dir, "Smiley_2222222.png")), "FACE",
+                 "highlights", "Decal", "", "RIGHT")
+nodes = gem.material_slots[0].material.node_tree.nodes
+check(M.decal_wraps(gem, hl) and not any(n.bl_idname == "ShaderNodeVectorTransform" for n in nodes)
+      and sum(1 for n in nodes if n.bl_idname == "ShaderNodeUVMap") >= 2,
+      "Decal on a mesh part wraps by UV instead of projecting onto one face")
+check(not M.decal_wraps(wall, wall.rblx.layers[0]), "Decal on a block still goes on its face")
+prop = bpy.ops.import_scene.rblx.get_rna_type().properties["filepath"]
+check(prop.is_skip_save, "Import doesn't remember the last file (no repeat imports)")
 real = O.get("RealMesh")
 if real_mesh and draco_ok:
     check(real is not None and len(real.data.polygons) > 4 and not real.rblx.asset_missing
@@ -386,7 +405,9 @@ bpy.context.view_layer.update()
 check(close(arm.matrix_world.translation, (-1.5, 0.0, 3.0)),
       "Right Arm at rest on the character's right (Blender -X when facing -Y) %s"
       % T(arm.matrix_world.translation))
-check(close(torso.rblx.color, (13 / 255, 105 / 255, 172 / 255)), "BodyColors applied (blue torso)")
+check(close(torso.rblx.color, to_linear((13 / 255, 105 / 255, 172 / 255))), "BodyColors applied (blue torso)")
+check(abs(torso.rblx.bevel - 0.065) < 1e-6 and len(torso.data.polygons) > 6,
+      "R6 body parts get Roblox's rounded edges (%d faces)" % len(torso.data.polygons))
 head = bpy.data.objects.get("Head")
 check(head is not None and any(l.name == "face" and l.image is not None for l in head.rblx.layers),
       "Head has a face (classic face fallback)")
@@ -426,6 +447,68 @@ hatt.props.update(Name="HatAttachment", CFrame=CFrame((0.0, -0.3, 0.0)))
 handle.add_child(hatt)
 check(CH.attach_accessory(model, acc) and close(handle.props["CFrame"].pos, (0, 5.4, 0)),
       "Accessory placed by matching HatAttachment: %s" % T(handle.props["CFrame"].pos))
+# v1 text meshes keep their UVs as stored (v2+ are flipped)
+v1 = b"version 1.00\n1\n[0,0,0][0,1,0][0.1,0.25,0][2,0,0][0,1,0][0.9,0.25,0][0,2,0][0,1,0][0.5,0.75,0]"
+md1 = rbxmesh.read_mesh(v1)
+check(close(md1.uvs[0], (0.1, 0.25)) and close(md1.positions[1], (1.0, 0.0, 0.0)),
+      "v1 mesh: UVs not flipped, positions halved (%s)" % (md1.uvs[0],))
+
+# Accessory Adjustment: offset/rotation/scale in the attachment's frame
+doc_a = CH.build_r6_document()
+acc2 = Instance("Accessory")
+acc2.props["Name"] = "Adjusted"
+h2 = Instance("Part")
+h2.props.update(Name="Handle", size=(1.0, 1.0, 1.0))
+acc2.add_child(h2)
+a2 = Instance("Attachment")
+a2.props.update(Name="HatAttachment", CFrame=CFrame((0.0, -0.3, 0.0)))
+h2.add_child(a2)
+adj = CH.accessory_adjustment({"meta": {"position": {"X": 0, "Y": 0.2, "Z": 0},
+                                        "rotation": {"X": 0, "Y": 90, "Z": 0},
+                                        "scale": {"X": 2, "Y": 2, "Z": 2}}})
+CH.attach_accessory(doc_a.roots[0], acc2, adj)
+cf2 = h2.props["CFrame"]
+check(adj is not None and close(cf2.pos, (0, 5.4 + 0.2 + 0.3, 0), 1e-4) and close(h2.props["size"], (2, 2, 2))
+      and abs(cf2.rot[2] - 1.0) < 1e-6,
+      "Accessory Adjustment applies offset, 90deg turn and 2x scale: pos %s" % T(cf2.pos))
+check(CH.accessory_adjustment({"meta": {"order": 1}}) is None and CH.accessory_adjustment({}) is None,
+      "No adjustment when the avatar has none")
+
+# R6 body package (CharacterMesh) swaps a block for the package mesh
+doc_p = CH.build_r6_document()
+cm = Instance("CharacterMesh")
+cm.props.update(Name="CharacterMesh", BodyPart=1, MeshId=1111111, BaseTextureId=2222222, OverlayTextureId=0)
+doc_p.roots[0].add_child(cm)
+cm2 = Instance("CharacterMesh")
+cm2.props.update(Name="CharacterMesh", BodyPart=2, MeshId=987654321987)  # not downloadable
+doc_p.roots[0].add_child(cm2)
+n_applied = CH.apply_character_meshes(doc_p.roots[0], local if "local" in dir() else
+                                      A.AssetResolver([assets_dir], use_cache=False))
+t_sm = doc_p.roots[0].find_first_child("Torso").find_first_child_of_class("SpecialMesh")
+check(n_applied == 1 and t_sm is not None and t_sm.props["MeshId"].endswith("1111111")
+      and t_sm.props["TextureId"].endswith("2222222")
+      and doc_p.roots[0].find_first_child("Left Arm").find_first_child_of_class("SpecialMesh") is None,
+      "R6 body package mesh applied; parts whose mesh can't download stay blocks")
+
+# Dynamic/classic head assets (SpecialMesh + face texture + attachment Vector3Values)
+local = A.AssetResolver([assets_dir], use_cache=False)
+doc_h = CH.build_r6_document()
+head_i = doc_h.roots[0].find_first_child("Head")
+missing_sm = Instance("SpecialMesh")
+missing_sm.props.update(Name="Mesh", MeshType=5, MeshId="rbxassetid://424242424242")
+check(not CH.apply_head_mesh(head_i, missing_sm, local) and head_i.find_first_child("face") is not None,
+      "Head asset whose mesh can't be downloaded keeps the classic head and face")
+sm = Instance("SpecialMesh")
+sm.props.update(Name="Mesh", MeshType=5, MeshId="rbxassetid://1111111", TextureId="rbxassetid://2222222")
+v = Instance("Vector3Value")
+v.props.update(Name="HairAttachment", Value=(0.0, 0.9, 0.1))
+sm.add_child(v)
+ok = CH.apply_head_mesh(head_i, sm, local)
+hair_att = head_i.find_first_child("HairAttachment")
+check(ok and head_i.find_first_child_of_class("SpecialMesh").props["MeshId"].endswith("1111111")
+      and head_i.find_first_child("face") is None and close(hair_att.props["CFrame"].pos, (0, 0.9, 0.1)),
+      "Dynamic head: mesh + face texture replace the classic face, attachments move")
+
 imp = I.Importer(bpy.context, I.ImportOptions(allow_download=False))
 imp.run_document(doc, "WithHat")
 hat_handle = next(o for o in imp.collection.objects if o.name.startswith("Handle"))
@@ -440,19 +523,74 @@ if r15 is not None:
     rig15 = bpy.context.active_object
     check(res == {"FINISHED"} and rig15.rblx.kind == "RIG" and len(rig15.data.bones) == 16,
           "R15 rig from Studio: %d bones" % len(rig15.data.bones))
+    bpy.context.view_layer.update()
+    r15_parts = [o for o in bpy.data.objects if o.rblx.kind == "PART" and o.parent == rig15]
+    lowest = min((o.matrix_world @ Vector(c)).z for o in r15_parts if o.type == "MESH" for c in o.bound_box)
+    check(abs(lowest) < 0.25, "R15 rig stands on the ground at the origin (lowest point z=%.2f)" % lowest)
+    uarm = next((o for o in r15_parts if o.name.startswith("LeftUpperArm")), None)
+    select_only(uarm)
+    bpy.ops.rblx.apply_clothing(filepath=shirt_png, kind="SHIRT")
+    hand = next((o for o in r15_parts if o.name.startswith("LeftHand")), None)
+    box_u, box_h = uarm.get("rblx_template_box"), hand.get("rblx_template_box")
+    check(uarm.data.uv_layers.get("RBX_Template_LEFT_LIMB") is not None and box_u is not None and
+          box_h is not None and abs(box_u[4] - box_h[4]) < 1e-3 and box_u[4] > 0.9,
+          "R15 shirt: upper arm and hand share one arm-sized clothing box (half height %.2f)"
+          % (box_u[4] if box_u else -1))
 else:
     skip("Roblox Studio not installed: R15 rig")
 
 # ---------------------------------------------------------------- downloads / web APIs (network)
-from rblx_tools.download import Downloader, DownloadError
-dl = Downloader("not-a-real-key", os.path.join(SCRATCH, "dl"), timeout=15)
-path = dl.fetch("1818")
-err = dl.errors.get("1818", "")
-if "Network error" in err:
-    skip("No network: download error handling")
+from rblx_tools.download import Downloader, DownloadError, clean_cookie
+check(clean_cookie(' .ROBLOSECURITY="_|WARNING:abc123"; ') == "_|WARNING:abc123",
+      "Cookie accepted with or without the .ROBLOSECURITY= prefix")
+lib = os.path.join(SCRATCH, "dl_library")
+dl = Downloader(lib, anonymous=True, timeout=20)
+mesh_path = dl.fetch("1699715537")  # Roblox's default R15 LeftHand mesh
+if mesh_path is None and "Network error" in dl.errors.get("1699715537", ""):
+    skip("No network: downloads")
 else:
-    check(path is None and ("401" in err or "403" in err or "rejected" in err),
-          "Bad API key is reported clearly: %s" % err)
+    check(mesh_path is not None and os.path.dirname(mesh_path) == os.path.join(lib, "meshes")
+          and dl.methods.get("1699715537") == "no login",
+          "Roblox-made mesh downloads with no login into library/meshes: %s"
+          % (mesh_path and os.path.relpath(mesh_path, lib)))
+    if mesh_path:
+        md = rbxmesh.read_mesh(open(mesh_path, "rb").read())
+        check(len(md.faces) > 0, "Downloaded mesh decodes (%s, %d tris)" % (md.version, len(md.faces)))
+    tex_path = dl.fetch("6023426923")  # a Roblox-made texture
+    check(tex_path is not None and os.path.dirname(tex_path) == os.path.join(lib, "textures")
+          and M.load_image(tex_path) is not None,
+          "Roblox-made texture downloads into library/textures: %s"
+          % (tex_path and os.path.relpath(tex_path, lib)))
+    # Saved for future use: a resolver without any downloader finds them offline
+    offline = A.AssetResolver([lib], use_cache=False)
+    check(offline.resolve_mesh("rbxassetid://1699715537") == mesh_path and
+          offline.resolve_image("http://www.roblox.com/asset/?id=6023426923") == tex_path,
+          "Library files are reused later without downloading")
+    # Creator uploads need a login; a fake cookie is rejected cleanly
+    fake = "_|WARNING:-DO-NOT-SHARE-THIS.--fakecookie123"
+    dl2 = Downloader(os.path.join(SCRATCH, "dl2"), cookie=fake, anonymous=True, timeout=20)
+    p2 = dl2.fetch("102224981335565")
+    err = dl2.errors.get("102224981335565", "")
+    check(p2 is None and "cookie" in err and "Authentication required" in err and "fakecookie" not in err,
+          "Creator asset with a bad cookie: clear error, cookie not leaked: %s" % err)
+    check("cookie" in dl2.disabled, "Rejected cookie isn't retried for every asset")
+    # Optional: your own credentials from environment variables (never printed or saved)
+    for env, kw in (("RBLX_TEST_COOKIE", "cookie"), ("RBLX_TEST_API_KEY", "api_key")):
+        secret = os.environ.get(env, "").strip()
+        if not secret:
+            skip("%s not set: real %s download" % (env, kw))
+            continue
+        real = Downloader(os.path.join(SCRATCH, "real_" + kw), anonymous=False, timeout=30,
+                          **{kw: secret})
+        aid = os.environ.get("RBLX_TEST_ASSET", "102224981335565")
+        rp = real.fetch(aid)
+        check(rp is not None, "Creator asset %s downloads with your %s -> %s" % (
+            aid, kw, os.path.basename(rp) if rp else real.errors.get(aid, "").replace(secret, "***")))
+        del secret, real
+    dl3 = Downloader(os.path.join(SCRATCH, "dl3"), api_key="not-a-real-key", anonymous=False, timeout=20)
+    p3 = dl3.fetch("102224981335565")
+    check(p3 is None and "API key" in dl3.errors.get("102224981335565", ""),
+          "Bad API key is reported clearly: %s" % dl3.errors.get("102224981335565"))
 try:
     uid, uname = CH.lookup_user_id("Roblox")
     av = CH.fetch_avatar(uid)

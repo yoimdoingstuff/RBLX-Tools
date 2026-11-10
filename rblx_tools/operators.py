@@ -25,7 +25,9 @@ DEFAULT_SIZES = {
     "TRUSS": (2.0, 2.0, 2.0),
     "HEAD": (2.0, 1.0, 1.0),
 }
-MEDIUM_STONE_GREY = (163 / 255.0, 162 / 255.0, 165 / 255.0)
+from .rbx.color import to_linear  # noqa: E402
+
+MEDIUM_STONE_GREY = to_linear((163 / 255.0, 162 / 255.0, 165 / 255.0))  # linear
 
 
 def _parts(objects):
@@ -72,6 +74,9 @@ class IMPORT_SCENE_OT_rblx(bpy.types.Operator, ImportHelper):
     bl_options = {"REGISTER", "UNDO", "PRESET"}
 
     filename_ext = ".rbxm"
+    # SKIP_SAVE: Blender otherwise remembers the last file, and the next import
+    # would silently re-import it instead of opening the file browser.
+    filepath: StringProperty(name="File Path", subtype="FILE_PATH", options={"HIDDEN", "SKIP_SAVE"})
     filter_glob: StringProperty(default=ROBLOX_FILES, options={"HIDDEN"})
     files: CollectionProperty(type=bpy.types.OperatorFileListElement, options={"HIDDEN", "SKIP_SAVE"})
     directory: StringProperty(subtype="DIR_PATH", options={"HIDDEN", "SKIP_SAVE"})
@@ -101,6 +106,8 @@ class IMPORT_SCENE_OT_rblx(bpy.types.Operator, ImportHelper):
         col = self.layout.column()
         col.prop(self, "stud_scale")
         col.prop(self, "download")
+        if self.download:
+            col.label(text=assets.describe_access(), icon="INFO")
         col.prop(self, "build_rigs")
         col.separator()
         col.prop(self, "import_lighting")
@@ -113,8 +120,9 @@ class IMPORT_SCENE_OT_rblx(bpy.types.Operator, ImportHelper):
 
     def invoke(self, context, event):
         self.stud_scale = context.scene.rblx.stud_scale
-        if self.filepath and os.path.isfile(self.filepath):
-            return self.execute(context)  # drag & drop
+        # Drag & drop passes the file in; a normal import opens the file browser
+        if self.properties.is_property_set("filepath", ghost=False) and os.path.isfile(self.filepath):
+            return self.execute(context)
         return ImportHelper.invoke(self, context, event)
 
     def execute(self, context):
@@ -525,7 +533,7 @@ class RBLX_OT_layer_paint(bpy.types.Operator):
         obj, layer = _active_layer(context)
         me = obj.data
         uv_name = "UVMap"
-        if layer.mapping == "TEMPLATE" and obj.rblx.shape in ("BLOCK", "TRUSS"):
+        if layer.mapping == "TEMPLATE" and me.uv_layers.get("RBX_Template_" + layer.template_region):
             uv_name = "RBX_Template_" + layer.template_region
         if me.uv_layers.get(uv_name) is not None:
             me.uv_layers.active = me.uv_layers[uv_name]
@@ -762,6 +770,8 @@ class RBLX_OT_apply_clothing(bpy.types.Operator, ImportHelper):
         for p in parts:
             by_name.setdefault(p.name.split(".")[0], p)
         kind_name = {"SHIRT": "Shirt", "PANTS": "Pants", "TSHIRT": "ShirtGraphic"}[self.kind]
+        character.set_clothing_boxes(None, by_name, coords.stud_scale(context.scene),
+                                     lambda o: o.matrix_world)
         n = 0
         if self.kind == "TSHIRT":
             target = by_name.get("Torso") or by_name.get("UpperTorso")
@@ -858,10 +868,9 @@ class RBLX_OT_import_avatar(bpy.types.Operator):
         col = self.layout.column()
         col.prop(self, "username")
         col.prop(self, "rig_type")
-        resolver_note = assets.make_downloader()[1]
-        if resolver_note:
-            col.label(text="Clothing/accessories need an API key:", icon="INFO")
-            col.label(text=resolver_note)
+        col.label(text=assets.describe_access(), icon="INFO")
+        if assets.make_downloader()[1]:
+            col.label(text="Clothing/accessories need an API key or cookie")
 
     def execute(self, context):
         if not self.username.strip():
@@ -884,6 +893,13 @@ class RBLX_OT_import_avatar(bpy.types.Operator):
         for content, who in report.missing.items():
             for w in who:
                 imp.report.miss(content, w, resolver.error_for(content))
+        blocked = getattr(report, "avatar_needs_login", [])
+        if blocked:
+            imp.report.warnings.insert(0, "Avatar items that couldn't be downloaded: " + ", ".join(blocked))
+            hint = ("add an API key or .ROBLOSECURITY cookie (Sidebar > Roblox > Import & Assets)"
+                    if resolver.download_note else "check the reasons in Text Editor > RBX Import Report")
+            self.report({"WARNING"}, "%d item(s) not downloaded (%s): %s" % (
+                len(blocked), ", ".join(blocked[:4]) + ("..." if len(blocked) > 4 else ""), hint))
         imp.report.write_text(name)
         return {"FINISHED"}
 
@@ -923,22 +939,66 @@ class RBLX_OT_reload_assets(bpy.types.Operator):
 
 
 class RBLX_OT_clear_cache(bpy.types.Operator):
-    """Delete downloaded Roblox assets from the cache folder"""
+    """Delete the downloaded meshes, textures and models from the asset library
+    (they'll be downloaded again when needed)"""
     bl_idname = "rblx.clear_cache"
-    bl_label = "Clear Download Cache"
+    bl_label = "Clear Asset Library"
 
     def invoke(self, context, event):
-        return context.window_manager.invoke_confirm(self, event)
+        return context.window_manager.invoke_confirm(
+            self, event, message="Delete all downloaded Roblox assets from the library?")
 
     def execute(self, context):
-        d = assets.cache_dir()
+        from .download import LIBRARY_SUBFOLDERS
+        lib = assets.library_dir()
         n = 0
-        for fn in os.listdir(d):
-            p = os.path.join(d, fn)
-            if os.path.isfile(p):
-                os.remove(p)
-                n += 1
-        self.report({"INFO"}, "Removed %d cached file(s)" % n)
+        for sub in LIBRARY_SUBFOLDERS:
+            d = os.path.join(lib, sub)
+            if not os.path.isdir(d):
+                continue
+            for fn in os.listdir(d):
+                p = os.path.join(d, fn)
+                # only files this add-on downloaded (named <asset id>.<ext>)
+                if os.path.isfile(p) and os.path.splitext(fn)[0].split(".")[0].isdigit():
+                    os.remove(p)
+                    n += 1
+        self.report({"INFO"}, "Removed %d downloaded file(s)" % n)
+        return {"FINISHED"}
+
+
+class RBLX_OT_test_download(bpy.types.Operator):
+    """Download one asset to check your API key / cookie (saved into the asset library)"""
+    bl_idname = "rblx.test_download"
+    bl_label = "Test Download"
+
+    asset: StringProperty(name="Asset ID", default="",
+                          description="Any mesh, texture or model id. Use one of your own or a "
+                                      "creator's asset to test your key/cookie (Roblox-made "
+                                      "assets download without any login)")
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        col = self.layout.column()
+        col.prop(self, "asset")
+        col.label(text=assets.describe_access(), icon="INFO")
+
+    def execute(self, context):
+        aid = assets.asset_id(self.asset.strip()) or self.asset.strip()
+        if not aid.isdigit():
+            self.report({"ERROR"}, "Enter an asset id (the number in the asset's URL)")
+            return {"CANCELLED"}
+        downloader, note = assets.make_downloader()
+        if downloader is None:
+            self.report({"ERROR"}, note)
+            return {"CANCELLED"}
+        path = downloader.fetch(aid)
+        if path is None:
+            self.report({"ERROR"}, "Couldn't download %s: %s" % (aid, downloader.errors.get(aid)))
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Downloaded %s with %s -> %s" % (
+            aid, downloader.methods.get(aid), os.path.relpath(path, assets.library_dir())))
         return {"FINISHED"}
 
 
@@ -1045,6 +1105,7 @@ CLASSES = (
     RBLX_OT_import_avatar,
     RBLX_OT_reload_assets,
     RBLX_OT_clear_cache,
+    RBLX_OT_test_download,
     RBLX_OT_apply_lighting,
     RBLX_OT_lighting_preset,
     RBLX_OT_load_lighting,

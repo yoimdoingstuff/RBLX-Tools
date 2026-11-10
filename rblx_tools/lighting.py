@@ -10,6 +10,7 @@ from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProp
 from mathutils import Vector
 
 from . import coords
+from .rbx.color import to_linear
 
 COLLECTION_NAME = "Roblox Lighting"
 SUN_NAME = "RBX Sun"
@@ -26,8 +27,10 @@ def _on_change(self, context):
 
 
 def _color(name, default, desc=""):
+    """Colour property; `default` is given as a Roblox (sRGB) value and stored
+    linear, like every colour in Blender."""
     return FloatVectorProperty(name=name, size=3, subtype="COLOR", min=0.0, max=1.0,
-                               default=default, update=_on_change, description=desc)
+                               default=to_linear(default), update=_on_change, description=desc)
 
 
 SKY_ITEMS = [
@@ -263,12 +266,8 @@ def _build_world(world, props, fog_on):
             except RuntimeError:
                 pass
         L.new(env.outputs["Color"], sky_bg.inputs["Color"])
-
-    if fog_on:
-        vol = N.new("ShaderNodeVolumeScatter")
-        vol.name = "RBX_Fog"
-        vol.location = (650, -250)
-        L.new(vol.outputs[0], out.inputs["Volume"])
+    # Fog/atmosphere are a volume box object (see _update_fog_volume), not a
+    # world volume: an infinite world volume blocks all sunlight in Cycles.
 
 
 def _update_world(world, props, scene, sun_dir_bl, fog_on, fog_density):
@@ -279,7 +278,8 @@ def _update_world(world, props, scene, sun_dir_bl, fog_on, fog_density):
 
     amb = N.get("RBX_Ambient")
     if amb:
-        oa = Vector(props.outdoor_ambient) * (0.25 + 0.75 * day)
+        # colours are linear now; x2 keeps Roblox's ambient brightness
+        oa = Vector(props.outdoor_ambient) * (0.25 + 0.75 * day) * 2.0
         col = oa + Vector(props.ambient) * 0.5 + Vector(props.color_shift_bottom) * 0.3
         amb.inputs["Color"].default_value = (min(col.x, 1.0), min(col.y, 1.0), min(col.z, 1.0), 1.0)
         amb.inputs["Strength"].default_value = 0.4 + 0.6 * props.environment_diffuse_scale
@@ -324,10 +324,63 @@ def _update_world(world, props, scene, sun_dir_bl, fog_on, fog_density):
     if phys:
         _configure_physical_sky(phys, sun_dir_bl, props)
 
-    fog = N.get("RBX_Fog")
-    if fog:
-        fog.inputs["Color"].default_value = (*props.fog_color, 1.0)
-        fog.inputs["Density"].default_value = fog_density
+FOG_NAME = "RBX Fog Volume"
+
+
+def _update_fog_volume(scene, props, scale):
+    """Roblox Fog and Atmosphere haze as a volume box around the scene. It is
+    hidden from shadow and bounce rays, so (like Roblox) it fades distant
+    things without darkening the sunlight on nearby ones."""
+    density = 0.0
+    half = 0.0
+    if props.fog_end < 10000.0:
+        dist = max(props.fog_end - props.fog_start * 0.5, 1.0) * scale
+        density += 3.0 / dist  # ~95% fogged at FogEnd
+        half = max(half, props.fog_end * 1.5)
+    if props.atmosphere_density > 0.05:
+        density += props.atmosphere_density * 0.002 / scale
+        half = max(half, 1500.0)
+    obj = bpy.data.objects.get(FOG_NAME)
+    if density <= 0.0:
+        if obj is not None:
+            obj.hide_render = obj.hide_viewport = True
+        return
+    if obj is None:
+        import bmesh
+        me = bpy.data.meshes.new(FOG_NAME)
+        bm = bmesh.new()
+        bmesh.ops.create_cube(bm, size=2.0)
+        bm.to_mesh(me)
+        bm.free()
+        obj = bpy.data.objects.new(FOG_NAME, me)
+        _collection(scene).objects.link(obj)
+        mat = bpy.data.materials.new(FOG_NAME)
+        try:
+            mat.use_nodes = True
+        except (AttributeError, TypeError):
+            pass
+        nt = mat.node_tree
+        nt.nodes.clear()
+        out = nt.nodes.new("ShaderNodeOutputMaterial")
+        vol = nt.nodes.new("ShaderNodeVolumeScatter")
+        vol.name = "RBX_Fog"
+        vol.location = (-300, 0)
+        nt.links.new(vol.outputs[0], out.inputs["Volume"])
+        me.materials.append(mat)
+        obj.display_type = "BOUNDS"
+        obj.hide_select = True
+        for attr in ("visible_shadow", "visible_diffuse", "visible_glossy", "visible_transmission"):
+            if hasattr(obj, attr):
+                setattr(obj, attr, False)
+    elif obj.name not in scene.objects:
+        _collection(scene).objects.link(obj)
+    obj.hide_render = obj.hide_viewport = False
+    obj.scale = (half * scale,) * 3
+    mat = obj.data.materials[0] if obj.data.materials else None
+    node = mat.node_tree.nodes.get("RBX_Fog") if mat else None
+    if node is not None:
+        node.inputs["Color"].default_value = (*props.fog_color, 1.0)
+        node.inputs["Density"].default_value = density
 
 
 def _configure_physical_sky(node, sun_dir_bl, props):
@@ -395,11 +448,12 @@ def apply_lighting(scene):
         fog_density += props.atmosphere_density * 0.004 / scale
 
     world = _world(scene)
-    key = _structure_key(props, fog_on)
+    key = "v2|" + _structure_key(props, fog_on)
     if world.get("rblx_key") != key or world.node_tree.nodes.get("RBX_Mix") is None:
         _build_world(world, props, fog_on)
         world["rblx_key"] = key
     _update_world(world, props, scene, to_sun, fog_on, fog_density)
+    _update_fog_volume(scene, props, scale)
 
     scene.view_settings.exposure = props.exposure_compensation
 
@@ -443,6 +497,15 @@ PRESET_ITEMS = [
 ]
 
 
+# Preset colours above are written as Roblox (sRGB) values; store them linear.
+_COLOR_KEYS = ("ambient", "outdoor_ambient", "color_shift_top", "color_shift_bottom", "fog_color",
+               "atmosphere_color")
+for _preset in PRESETS.values():
+    for _k in _COLOR_KEYS:
+        if _k in _preset:
+            _preset[_k] = to_linear(_preset[_k])
+
+
 def set_props(scene, values):
     global _applying
     props = scene.rblx_lighting
@@ -473,7 +536,7 @@ def values_from_instance(lighting):
 
     def col(name, key):
         if name in p and isinstance(p[name], tuple) and len(p[name]) == 3:
-            v[key] = tuple(min(max(c, 0.0), 1.0) for c in p[name])
+            v[key] = to_linear(p[name])
 
     def num(name, key):
         if name in p and isinstance(p[name], (int, float)) and not isinstance(p[name], bool):
@@ -509,7 +572,7 @@ def values_from_instance(lighting):
             if isinstance(cp.get("Haze"), float):
                 v["atmosphere_haze"] = cp["Haze"]
             if isinstance(cp.get("Color"), tuple):
-                v["atmosphere_color"] = tuple(min(max(c, 0.0), 1.0) for c in cp["Color"])
+                v["atmosphere_color"] = to_linear(cp["Color"])
         elif child.class_name == "Sky":
             if isinstance(cp.get("CelestialBodiesShown"), bool):
                 v["celestial_bodies_shown"] = cp["CelestialBodiesShown"]
