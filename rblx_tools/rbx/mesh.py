@@ -2,8 +2,8 @@
 SpecialMesh.MeshId).
 
 Supported: versions 1.00/1.01 (text), 2.00, 3.00/3.01, 4.00/4.01, 5.00, and
-6.00/7.00 when the core mesh is stored uncompressed. Draco-compressed
-6.00/7.00 meshes are reported as unsupported.
+6.00/7.00 (plain or Draco-compressed; Draco needs a decoder, see
+set_draco_decoder).
 
 Returns positions/normals/uvs in Roblox studs (Y-up) and triangle indices.
 UV v is flipped into Blender's convention (v = 1 - v)."""
@@ -14,6 +14,18 @@ import struct
 
 class MeshFormatError(Exception):
     pass
+
+
+# Draco-compressed meshes (COREMESH v2, used by almost all current Roblox
+# meshes) need a Draco decoder. Inside Blender, rblx_tools.draco installs one
+# that uses the library Blender ships for its glTF importer.
+# Signature: decoder(draco_bytes) -> (positions, normals, uvs, triangles)
+_draco_decoder = None
+
+
+def set_draco_decoder(func):
+    global _draco_decoder
+    _draco_decoder = func
 
 
 class MeshData:
@@ -114,10 +126,16 @@ def _read_chunked(data, off, version):
         ctype = data[off:off + 8]
         cver, csize = struct.unpack_from("<II", data, off + 8)
         body = off + 16
-        if ctype == b"COREMESH":
+        if ctype == b"COREMESH" and cver == 2:
+            if _draco_decoder is None:
+                raise MeshFormatError("mesh %s is Draco-compressed and no Draco decoder is available"
+                                      % version)
+            dlen = struct.unpack_from("<I", data, body)[0]
+            pos, nrm, uvs, faces = _draco_decoder(bytes(data[body + 4:body + 4 + dlen]))
+            uvs = [(u, 1.0 - v) for u, v in uvs] if uvs else []
+        elif ctype == b"COREMESH":
             if cver != 1:
-                raise MeshFormatError(
-                    "mesh %s uses Draco compression (not supported yet)" % version)
+                raise MeshFormatError("mesh %s: unknown COREMESH version %d" % (version, cver))
             nverts = struct.unpack_from("<I", data, body)[0]
             pos, nrm, uvs, p = _read_vertices(data, body + 4, nverts, 40)
             nfaces = struct.unpack_from("<I", data, p)[0]

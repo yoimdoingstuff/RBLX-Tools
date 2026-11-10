@@ -1,8 +1,9 @@
 """Roblox <-> Blender coordinate conversion.
 
 Roblox is right-handed and Y-up (LookVector is -Z). Blender is right-handed
-and Z-up. Rotating +90 degrees about X maps one onto the other:
-    Blender (x, y, z) = Roblox (x, -z, y)
+and Z-up. We use the rotation that makes Roblox's front (-Z) face Blender's
+front (-Y), so Blender's Front view (numpad 1) looks a character in the face:
+    Blender (x, y, z) = Roblox (-x, z, y)
 Distances are multiplied by the scene's stud scale (Blender units per stud).
 """
 
@@ -10,8 +11,8 @@ import math
 
 from mathutils import Euler, Matrix, Vector
 
-# Roblox -> Blender axis change (rotation +90deg about X)
-AXIS = Matrix(((1.0, 0.0, 0.0), (0.0, 0.0, -1.0), (0.0, 1.0, 0.0)))
+# Roblox -> Blender axis change (a proper rotation, det = +1)
+AXIS = Matrix(((-1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, 1.0, 0.0)))
 AXIS_INV = AXIS.transposed()
 AXIS4 = AXIS.to_4x4()
 AXIS4_INV = AXIS_INV.to_4x4()
@@ -29,13 +30,13 @@ def stud_scale(scene=None):
 
 def vec_to_bl(v, scale=1.0):
     """Roblox position/vector (studs) -> Blender Vector."""
-    return Vector((v[0] * scale, -v[2] * scale, v[1] * scale))
+    return Vector((-v[0] * scale, v[2] * scale, v[1] * scale))
 
 
 def vec_to_rbx(v, scale=1.0):
     """Blender Vector -> Roblox (x, y, z) in studs."""
     s = 1.0 / scale if scale else 1.0
-    return (v[0] * s, v[2] * s, -v[1] * s)
+    return (-v[0] * s, v[2] * s, v[1] * s)
 
 
 def size_to_bl(size):

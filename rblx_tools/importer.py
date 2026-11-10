@@ -6,7 +6,7 @@ import os
 import bpy
 from mathutils import Matrix, Vector
 
-from . import assets, coords, geometry, lighting, materials
+from . import assets, character, coords, geometry, lighting, materials
 from .props import suspend_updates
 from .rbx import CFrame, enums, load_file
 from .rbx import mesh as rbxmesh
@@ -32,14 +32,19 @@ STORAGE_SERVICES = ("ReplicatedStorage", "ServerStorage", "StarterPack")
 
 MESH_TYPE_SHAPES = {
     "Wedge": "WEDGE", "Sphere": "BALL", "Cylinder": "CYLINDER", "Brick": "BLOCK",
-    "CornerWedge": "CORNER_WEDGE", "Torso": "BLOCK", "Head": "BLOCK",
+    "CornerWedge": "CORNER_WEDGE", "Torso": "BLOCK", "Head": "HEAD",
 }
+CLASSIC_HEAD_MESH = "rbxasset://avatar/heads/head.mesh"
+
+# Properties holding asset references, for prefetching downloads
+_ASSET_PROPS = ("MeshId", "MeshID", "TextureID", "TextureId", "Texture", "ShirtTemplate",
+                "PantsTemplate", "Graphic", "ColorMap", "NormalMap", "RoughnessMap", "MetalnessMap")
 
 
 class ImportOptions:
     def __init__(self, stud_scale=1.0, import_lighting=True, import_lights=True,
                  import_attachments=False, import_storage=False, asset_folder="",
-                 hide_invisible=True):
+                 hide_invisible=True, build_rigs=True, allow_download=True):
         self.stud_scale = stud_scale
         self.import_lighting = import_lighting
         self.import_lights = import_lights
@@ -47,34 +52,49 @@ class ImportOptions:
         self.import_storage = import_storage
         self.asset_folder = asset_folder
         self.hide_invisible = hide_invisible
+        self.build_rigs = build_rigs
+        self.allow_download = allow_download
 
 
 class ImportReport:
     def __init__(self):
         self.counts = {}
         self.missing = {}   # asset content -> [object names]
+        self.reasons = {}   # asset content -> why it's missing
         self.warnings = []
+        self.download_note = None
+        self.downloaded = 0
 
-    def count(self, key):
-        self.counts[key] = self.counts.get(key, 0) + 1
+    def count(self, key, n=1):
+        self.counts[key] = self.counts.get(key, 0) + n
 
-    def miss(self, content, who):
+    def miss(self, content, who, reason=None):
         self.missing.setdefault(content, []).append(who)
+        if reason:
+            self.reasons[content] = reason
 
     def summary(self):
         parts = ", ".join("%d %s" % (v, k) for k, v in sorted(self.counts.items()))
         s = "Imported " + (parts or "nothing")
+        if self.downloaded:
+            s += "; downloaded %d asset(s)" % self.downloaded
         if self.missing:
-            s += "; %d asset(s) not found locally" % len(self.missing)
+            s += "; %d asset(s) missing" % len(self.missing)
         return s
 
     def write_text(self, title):
         lines = ["Roblox import report: " + title, "", self.summary(), ""]
         if self.missing:
-            lines.append("Missing assets (put files named by their id in your Asset Folder,")
-            lines.append("then use Roblox > Assets > Reload Missing Assets):")
+            lines.append("Missing assets:")
+            if self.download_note:
+                lines.append("  (Not downloaded: %s)" % self.download_note)
             for content, who in sorted(self.missing.items()):
-                lines.append("  %s  (used by %d: %s)" % (content, len(who), ", ".join(who[:5])))
+                why = self.reasons.get(content)
+                lines.append("  %s  (used by %d: %s)%s" % (
+                    content, len(who), ", ".join(who[:5]), ("  -- " + why) if why else ""))
+            lines.append("")
+            lines.append("Fix: set an Open Cloud API key in the add-on preferences, or put files")
+            lines.append("named by asset id in your Asset Folder, then click Reload Missing Assets.")
             lines.append("")
         if self.warnings:
             lines.append("Warnings:")
@@ -86,27 +106,35 @@ class ImportReport:
 
 
 class Importer:
-    def __init__(self, context, options):
+    def __init__(self, context, options, resolver=None):
         self.context = context
         self.scene = context.scene
         self.opts = options
         self.scale = options.stud_scale
-        self.resolver = assets.default_resolver(options.asset_folder)
+        self.resolver = resolver or assets.default_resolver(options.asset_folder,
+                                                            options.allow_download)
         self.report = ImportReport()
+        self.report.download_note = self.resolver.download_note
         self.world = {}           # object -> world matrix we assigned
+        self.objects = {}         # id(instance) -> object
         self.mesh_cache = {}
         self.mesh_data_cache = {}
         self._has_parts = {}
         self.collection = None
+        self.roots = []
+        self.characters = []
 
     # ------------------------------------------------------------------
     def run(self, path):
         doc = load_file(path, self.report.warnings)
-        title = os.path.splitext(os.path.basename(path))[0]
+        return self.run_document(doc, os.path.splitext(os.path.basename(path))[0])
 
+    def run_document(self, doc, title):
         self.scene.rblx.stud_scale = self.scale
         self.collection = bpy.data.collections.new(title)
         self.scene.collection.children.link(self.collection)
+
+        self.prefetch(doc)
 
         is_place = any(r.class_name in SERVICE_CLASSES for r in doc.roots)
         lighting_inst = None
@@ -132,12 +160,53 @@ class Importer:
                     else:
                         self.build(root, None)
 
+            for inst, obj in self.characters:
+                try:
+                    character.setup(self, inst, obj) if self.opts.build_rigs else (
+                        character.apply_body_colors(self, inst), character.apply_clothing(self, inst))
+                except Exception as ex:  # keep the import even if rigging fails
+                    self.report.warnings.append("%s: rig not built (%s)" % (inst.name, ex))
+
+        # Materials once everything (layers, colours) is in place
+        for obj in self.objects.values():
+            if obj.rblx.kind == "PART" and obj.rblx.material_mode != "SURFACE":
+                materials.refresh(obj)
+
         if lighting_inst is not None and self.opts.import_lighting:
             lighting.set_props(self.scene, lighting.values_from_instance(lighting_inst))
             self.report.count("lighting settings")
 
+        if self.resolver.downloader is not None:
+            self.report.downloaded = self.resolver.downloader.downloaded
         self.report.write_text(title)
         return self.report
+
+    def prefetch(self, doc):
+        if self.resolver.downloader is None:
+            return
+        contents = []
+        for inst in doc.all_instances():
+            for k in _ASSET_PROPS:
+                v = inst.props.get(k)
+                if isinstance(v, str) and v.strip():
+                    contents.append(v)
+        if not contents:
+            return
+        wm = self.context.window_manager
+        try:
+            wm.progress_begin(0, 100)
+        except Exception:
+            wm = None
+
+        def progress(done, total):
+            if wm is not None:
+                wm.progress_update(int(100 * done / max(total, 1)))
+
+        try:
+            self.resolver.prefetch(contents, progress)
+        finally:
+            if wm is not None:
+                wm.progress_end()
 
     # ------------------------------------------------------------------
     def has_parts(self, inst):
@@ -154,6 +223,7 @@ class Importer:
             obj.matrix_basis = self.world[parent].inverted_safe() @ world
         else:
             obj.matrix_basis = world
+            self.roots.append(obj)
         self.world[obj] = world
 
     def build(self, inst, parent_obj):
@@ -170,6 +240,8 @@ class Importer:
             obj = self.make_model(inst, parent_obj)
             for c in inst.children:
                 self.build(c, obj)
+            if character.is_character(inst):
+                self.characters.append((inst, obj))
         elif cls in ("Decal", "Texture"):
             if parent_obj is not None and parent_obj.rblx.kind == "PART":
                 self.make_decal(inst, parent_obj)
@@ -182,7 +254,6 @@ class Importer:
         elif cls in PART_MODIFIERS:
             pass  # consumed by make_part
         elif self.has_parts(inst):
-            # Unknown container (e.g. parts inside a script or value): keep going
             for c in inst.children:
                 self.build(c, parent_obj)
 
@@ -204,6 +275,10 @@ class Importer:
             if primary is not None and not isinstance(primary, (str, bytes)) and \
                     isinstance(primary.get("CFrame"), CFrame):
                 pivot = primary.props["CFrame"]
+        if not isinstance(pivot, CFrame) and inst.class_name in ("Accessory", "Accoutrement", "Hat"):
+            handle = inst.find_first_child("Handle")
+            if handle is not None and isinstance(handle.get("CFrame"), CFrame):
+                pivot = handle.props["CFrame"]
         if isinstance(pivot, CFrame):
             world = coords.cframe_to_matrix(pivot, self.scale)
         else:
@@ -214,7 +289,9 @@ class Importer:
                 c = [sum(p[i] for p in pts) / len(pts) for i in range(3)]
                 world.translation = coords.vec_to_bl(c, self.scale)
         self.report.count("models")
-        return self.make_empty(inst.name, parent_obj, world, "MODEL", inst.class_name)
+        obj = self.make_empty(inst.name, parent_obj, world, "MODEL", inst.class_name)
+        self.objects[id(inst)] = obj
+        return obj
 
     # ------------------------------------------------------------------
     def load_mesh(self, content, who):
@@ -223,22 +300,33 @@ class Importer:
         if content in self.mesh_data_cache:
             return self.mesh_data_cache[content]
         md = None
-        path = self.resolver.resolve(content)
+        path = self.resolver.resolve_mesh(content)
         if path is None:
-            self.report.miss(content, who)
+            self.report.miss(content, who, self.resolver.error_for(content))
         else:
             try:
                 with open(path, "rb") as f:
                     md = rbxmesh.read_mesh(f.read())
             except (OSError, rbxmesh.MeshFormatError) as ex:
                 self.report.warnings.append("%s: %s (%s)" % (who, ex, path))
-                self.report.miss(content, who)
+                self.report.miss(content, who, str(ex))
         self.mesh_data_cache[content] = md
         return md
 
     def mesh_datablock(self, md, mesh_id, name, fit, initial_size, mesh_scale, mesh_offset):
         return mesh_datablock_for(md, mesh_id, name, self.scale, fit, initial_size,
                                   mesh_scale, mesh_offset, self.mesh_cache)
+
+    def add_layer_from_content(self, obj, content, mapping, name, kind, color=(1.0, 1.0, 1.0),
+                               transparency=0.0, face="FRONT", region="TORSO",
+                               tiling=(2.0, 2.0, 0.0, 0.0)):
+        layer = materials.add_layer(obj, None, mapping, name, kind, content, face, color,
+                                    transparency, region, tiling, rebuild=False)
+        if not materials.resolve_layer_image(layer, self.resolver):
+            self.report.miss(content, obj.name, self.resolver.error_for(content))
+            obj.rblx.asset_missing = True
+        self.report.count("textures")
+        return layer
 
     def make_part(self, inst, parent_obj):
         cls = inst.class_name
@@ -254,8 +342,7 @@ class Importer:
             color = enums.brick_color(bc if isinstance(bc, int) else 194)
         transparency = float(inst.get("Transparency", default=0.0) or 0.0)
         reflectance = float(inst.get("Reflectance", default=0.0) or 0.0)
-        mat_token = inst.get("Material", default=256)
-        material_name = enums.MATERIALS.get(mat_token, "Plastic")
+        material_name = enums.MATERIALS.get(inst.get("Material", default=256), "Plastic")
 
         shape = "BLOCK"
         initial_size = size
@@ -263,6 +350,7 @@ class Importer:
         me = None
         mesh_id = ""
         texture_id = ""
+        texture_tint = (1.0, 1.0, 1.0)
         placeholder = False
         mesh_fit = True
         mscale = (1.0, 1.0, 1.0)
@@ -298,16 +386,19 @@ class Importer:
             if special is not None:
                 mscale = tuple(special.get("Scale", default=(1.0, 1.0, 1.0)))
                 moffset = tuple(special.get("Offset", default=(0.0, 0.0, 0.0)))
+                vc = special.get("VertexColor")
+                if isinstance(vc, tuple) and len(vc) == 3:
+                    texture_tint = tuple(min(max(c, 0.0), 1.0) for c in vc)
                 if special.class_name in ("SpecialMesh", "FileMesh"):
                     mtype = enums.MESH_TYPES.get(special.get("MeshType", default=5), "FileMesh")
                     if special.class_name == "FileMesh":
                         mtype = "FileMesh"
                 else:
                     mtype = "Brick" if special.class_name == "BlockMesh" else "Cylinder"
+                texture_id = special.get("TextureId", "TextureID", default="") or ""
 
                 if mtype == "FileMesh":
                     mesh_id = special.get("MeshId", "MeshID", default="") or ""
-                    texture_id = special.get("TextureId", "TextureID", default="") or ""
                     md = self.load_mesh(mesh_id, name)
                     shape = "MESH"
                     initial_size = size
@@ -317,6 +408,21 @@ class Importer:
                                                  mscale, moffset)
                     else:
                         placeholder = True
+                elif mtype == "Head":
+                    m = min(size)
+                    head_dims = (m * mscale[0], m * mscale[1], m * mscale[2])
+                    md = self.load_studio_mesh(CLASSIC_HEAD_MESH)
+                    if md is not None:
+                        shape = "MESH"
+                        initial_size = size
+                        mesh_id = CLASSIC_HEAD_MESH
+                        me = mesh_datablock_for(md, "head", "Head", self.scale, True, head_dims,
+                                                None, None, self.mesh_cache)
+                        mesh_fit = False
+                        mscale = head_dims
+                    else:
+                        shape = "HEAD"
+                        geom_size = (head_dims[0], head_dims[1], head_dims[2])
                 else:
                     shape = MESH_TYPE_SHAPES.get(mtype, "BLOCK")
                     geom_size = tuple(s * m for s, m in zip(size, mscale))
@@ -324,6 +430,7 @@ class Importer:
         # Object and geometry
         obj = bpy.data.objects.new(name, me if me is not None else bpy.data.meshes.new(name))
         self.collection.objects.link(obj)
+        self.objects[id(inst)] = obj
         if me is None:
             build_size = initial_size if placeholder else geom_size
             geometry.build_primitive(obj.data, "BLOCK" if placeholder else shape,
@@ -353,28 +460,40 @@ class Importer:
         r.locked = bool(inst.get("Locked", default=False))
         r.massless = bool(inst.get("Massless", default=False))
         r.mesh_id = mesh_id if isinstance(mesh_id, str) else ""
+        r.texture_id = texture_id if isinstance(texture_id, str) else ""
         r.mesh_fit = mesh_fit
         r.mesh_scale = mscale
         r.mesh_offset = moffset
-        r.texture_id = texture_id if isinstance(texture_id, str) else ""
         r.asset_missing = placeholder and bool(mesh_id)
 
         obj.color = (*color, 1.0 - r.transparency)
         obj.visible_shadow = r.cast_shadow
         if self.opts.hide_invisible and r.transparency >= 0.999:
             obj.display_type = "WIRE"
+        materials.ensure_slot(obj)
 
-        # Material
         if surface is not None:
             self.apply_surface_appearance(obj, surface)
-        elif r.texture_id:
-            if not materials.refresh_texture(obj, self.resolver):
-                self.report.miss(r.texture_id, name)
-        else:
-            materials.assign(obj, materials.part_material(material_name))
+        if r.texture_id:
+            self.add_layer_from_content(obj, r.texture_id, "UV", "TextureID", "TextureID",
+                                        color=texture_tint)
 
         self.report.count("parts")
         return obj
+
+    def load_studio_mesh(self, content):
+        if content in self.mesh_data_cache:
+            return self.mesh_data_cache[content]
+        md = None
+        path = self.resolver.resolve(content)
+        if path:
+            try:
+                with open(path, "rb") as f:
+                    md = rbxmesh.read_mesh(f.read())
+            except (OSError, rbxmesh.MeshFormatError):
+                md = None
+        self.mesh_data_cache[content] = md
+        return md
 
     def apply_surface_appearance(self, obj, sa):
         roles = {"color": "ColorMap", "normal": "NormalMap", "roughness": "RoughnessMap",
@@ -386,14 +505,13 @@ class Importer:
             if not isinstance(content, str) or not content:
                 continue
             ids.append(content)
-            path = self.resolver.resolve(content)
+            path = self.resolver.resolve_image(content)
             img = materials.load_image(path, non_color=(role != "color")) if path else None
             if img:
                 maps[role] = img
             else:
-                self.report.miss(content, obj.name)
+                self.report.miss(content, obj.name, self.resolver.error_for(content))
         if not maps:
-            materials.assign(obj, materials.part_material(obj.rblx.material))
             return
         alpha_mode = sa.get("AlphaMode", default=0)
         tint = sa.get("Color", default=(1.0, 1.0, 1.0))
@@ -406,31 +524,27 @@ class Importer:
 
     # ------------------------------------------------------------------
     def make_decal(self, inst, part_obj):
-        kind = "TEXTURE" if inst.class_name == "Texture" else "DECAL"
-        obj = bpy.data.objects.new(inst.name, bpy.data.meshes.new(inst.name))
-        self.collection.objects.link(obj)
-        self.place(obj, part_obj, self.world[part_obj])
-        r = obj.rblx
-        r.kind = kind
-        r.class_name = inst.class_name
-        r.face = enums.NORMAL_IDS.get(inst.get("Face", default=5), "FRONT")
-        color = inst.get("Color3", "Color")
-        r.color = color if isinstance(color, tuple) and len(color) == 3 else (1.0, 1.0, 1.0)
-        r.transparency = min(max(float(inst.get("Transparency", default=0.0) or 0.0), 0.0), 1.0)
-        if kind == "TEXTURE":
-            r.studs_per_tile_u = float(inst.get("StudsPerTileU", default=2.0))
-            r.studs_per_tile_v = float(inst.get("StudsPerTileV", default=2.0))
-            r.offset_studs_u = float(inst.get("OffsetStudsU", default=0.0))
-            r.offset_studs_v = float(inst.get("OffsetStudsV", default=0.0))
         tex = inst.get("Texture", "TextureContent", "ColorMap", default="")
-        r.texture_id = tex if isinstance(tex, str) else ""
-        obj.color = (*r.color, 1.0 - r.transparency)
-        obj.visible_shadow = False
-        geometry.rebuild_decal(obj)
-        if not materials.refresh_texture(obj, self.resolver):
-            self.report.miss(r.texture_id, inst.name)
+        if not isinstance(tex, str):
+            tex = ""
+        face = enums.NORMAL_IDS.get(inst.get("Face", default=5), "FRONT")
+        color = inst.get("Color3", "Color")
+        color = color if isinstance(color, tuple) and len(color) == 3 else (1.0, 1.0, 1.0)
+        color = tuple(min(max(c, 0.0), 1.0) for c in color)
+        transparency = min(max(float(inst.get("Transparency", default=0.0) or 0.0), 0.0), 1.0)
+        if inst.class_name == "Texture":
+            tiling = (float(inst.get("StudsPerTileU", default=2.0)),
+                      float(inst.get("StudsPerTileV", default=2.0)),
+                      float(inst.get("OffsetStudsU", default=0.0)),
+                      float(inst.get("OffsetStudsV", default=0.0)))
+            mapping = "TILED"
+        else:
+            tiling = (2.0, 2.0, 0.0, 0.0)
+            mapping = "FACE"
+        self.add_layer_from_content(part_obj, tex, mapping, inst.name, inst.class_name,
+                                    color=color, transparency=transparency, face=face,
+                                    tiling=tiling)
         self.report.count("decals")
-        return obj
 
     def make_light(self, inst, part_obj):
         cls = inst.class_name
@@ -524,7 +638,7 @@ def reload_part_mesh(obj, resolver, cache=None):
     r = obj.rblx
     if r.kind != "PART" or r.shape != "MESH" or not r.mesh_id:
         return False
-    path = resolver.resolve(r.mesh_id)
+    path = resolver.resolve_mesh(r.mesh_id)
     if not path:
         return False
     try:
@@ -541,7 +655,7 @@ def reload_part_mesh(obj, resolver, cache=None):
     if old is not None and old.users == 0:
         bpy.data.meshes.remove(old)
     materials.ensure_slot(obj)
-    r.asset_missing = False
+    materials.refresh(obj)
     return True
 
 

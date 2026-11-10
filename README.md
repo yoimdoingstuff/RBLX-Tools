@@ -1,8 +1,9 @@
 # RBLX-Tools
 Blender plugin for animating Roblox related scenes.
 
-Import Roblox models and places into Blender, edit parts with a Studio-style
-properties panel, and light scenes with Roblox's Lighting settings.
+Import Roblox models, places, characters and avatars into Blender. Edit parts
+with a Studio-style properties panel, put your own textures on parts, and light
+scenes with Roblox's Lighting settings.
 
 Tested on Blender 5.2. Needs Blender 4.2 or newer.
 
@@ -12,46 +13,62 @@ Tested on Blender 5.2. Needs Blender 4.2 or newer.
   (XML). Use File > Import > Roblox, or drag a file into the viewport.
   - Parts: Block, Ball, Cylinder, Wedge, CornerWedge and Truss, with correct
     size, position, rotation, color, material and transparency.
-  - MeshParts and SpecialMesh FileMeshes. Roblox `.mesh` versions 1 to 5 are
-    supported, and 6 and 7 when they aren't Draco-compressed.
-  - Models and Folders become empties, placed at the model's pivot, so you can
-    move or animate a whole model at once.
-  - Decals and Textures, SurfaceAppearance (PBR maps), and Point, Spot and
-    Surface lights. Attachments are optional.
-  - Place files also bring in their Lighting settings, including Atmosphere and
-    Sky.
-  - Scripts, GUIs and other non-visual objects are skipped.
-- **Properties panel** (Sidebar > Roblox > Properties) for the selected part:
-  - Color, Material, Transparency, Reflectance and CastShadow.
-  - Position, Orientation and Size in studs, on Roblox's axes (Y up).
-  - Shape, plus Anchored, CanCollide and the other behavior flags.
-  - MeshId and TextureID.
+  - **Meshes**: MeshParts and SpecialMeshes, including current Draco-compressed
+    `.mesh` v6/v7 files (decoded with the Draco library that ships with
+    Blender).
+  - Models and Folders become empties at the model's pivot. Decals, Textures,
+    SurfaceAppearance and lights are imported too.
+  - Place files also bring in their Lighting settings.
+- **Downloading assets**: meshes and images are downloaded automatically
+  through Roblox Open Cloud with your own API key (see below). They're cached,
+  so each asset is only downloaded once.
+- **Characters**
+  - Any Model with a Humanoid becomes a **rigged character**. An armature is
+    built from its Motor6D joints, and each body part follows its bone, so you
+    animate in Pose Mode.
+  - BodyColors, Shirts, Pants, T-Shirts, faces and accessories are applied.
+  - **Add > Roblox > R6 / R15 Character** inserts a ready-to-animate rig. R6
+    works offline; R15 uses the rig from your Roblox Studio install.
+  - **Avatar from Username**: imports anyone's avatar as a rigged R6 or R15
+    character, with body colors, clothing, face, body parts and accessories.
+- **Studio-style properties** (Sidebar > Roblox > Properties, and Properties
+  Editor > Object > Roblox):
+  - Grouped like Studio: Appearance (BrickColor, CastShadow, Color, Material,
+    Reflectance, Transparency), Data (ClassName, Name, Position, Orientation),
+    Behavior, and Part (Shape, Size).
+  - Like Studio, a change applies to **every selected part**. The "Edit N
+    selected" button turns that off.
   - Color, Transparency and Reflectance can be keyframed: hover over the field
     and press I.
+- **Textures** (Sidebar > Roblox > Textures): every part has a stack of texture
+  layers. Each layer is an image with:
+  - **Type**:
+    - **Decal**: one face.
+    - **Texture**: tiled on one face (StudsPerTile, Offset).
+    - **Wrap**: the whole part, using its UVs, like MeshPart.TextureID.
+    - **Clothing**: the Roblox 585×559 shirt/pants template.
+  - **Color3**: a tint that recolors the image **separately from the part**.
+    Transparent areas of the image show the part's own Color underneath, which
+    is how Roblox's transparent textures work.
+  - **Transparency**, **Enabled**, and a draw order (move up/down).
+  - **Editing**:
+    - Replace the image.
+    - Make Unique: give this part its own copy.
+    - Edit Image: open it in an Image Editor.
+    - Paint on Part: Texture Paint in the 3D view.
+    - Save Image As, or pack it into the .blend.
+  - **Drag an image file onto a part** in the viewport. It becomes a Decal on
+    the face you dropped it on, or wraps the part if it's a mesh.
+  - **Character panel**: Add Shirt / Pants / T-Shirt images (or asset ids) to
+    the selected character.
 - **Roblox lighting** (Sidebar > Roblox > Lighting):
   - ClockTime moves the sun and moon. Brightness, Ambient, OutdoorAmbient,
     ColorShift, ShadowSoftness, ExposureCompensation, Fog and Atmosphere work
     like their Studio counterparts.
-  - The sky can be a Roblox-style gradient, Blender's physical sky, or your own
-    sky image.
-  - Presets: Baseplate Default, Classic, Sunset, Night and Foggy. You can also
-    load the lighting from any place file.
-- **Roblox materials**: one shared material per Roblox material type (Plastic,
-  Wood, Neon, Glass, ForceField, ...).
-  - Each part's own Color and Transparency are read from the part, so one
-    material serves every part.
-  - Optionally point the addon at a folder of tileable textures named
-    `Wood.png`, `Wood_normal.png`, `Wood_roughness.png` and so on, and they're
-    used automatically.
-- **Roblox textures**: add any image (for example one downloaded from Roblox)
-  to selected parts in one of three ways:
-  - **Decal**: stretched once over one face.
-  - **Texture**: tiled by StudsPerTile.
-  - **Part texture**: wrapped over the whole part using its UVs, like a
-    MeshPart's TextureID.
-- **Insert parts**: Add > Roblox Part, or Sidebar > Roblox > Insert.
-- **Make Roblox Part**: turns any Blender mesh into a part, so it gets the
-  properties panel too.
+  - Presets, or load the lighting from any place file.
+- **Roblox materials**: one shared material per Roblox material type.
+  Optionally point the addon at a folder of tileable textures named
+  `Wood.png`, `Wood_normal.png`, ... and they're used automatically.
 
 ## Install
 
@@ -63,25 +80,40 @@ Tested on Blender 5.2. Needs Blender 4.2 or newer.
    choose **Install from Disk...**. Pick the zip.
 3. Open the sidebar in the 3D view (N) and select the **Roblox** tab.
 
-## Assets (meshes and images)
+## Getting meshes and images (API key)
 
 Roblox files only store asset ids like `rbxassetid://12345678`, not the actual
-meshes and images. The addon doesn't download anything; it looks for the
-files on your computer:
+meshes and images. Since April 2025 Roblox only gives asset files to
+authenticated requests, so the addon uses **your own Open Cloud API key**:
 
-- **Asset Folder** (Preferences, or Sidebar > Roblox > Import & Assets): a
-  folder with files you've downloaded, named by asset id. For example
+1. Go to <https://create.roblox.com/dashboard/credentials> and choose
+   **Create API Key**.
+2. Add the **Assets** API system with the `legacy-asset:manage` permission
+   (read access is all that's used). Set accepted IP addresses to `0.0.0.0/0`
+   or your own IP.
+3. Paste the key into Edit > Preferences > Add-ons > RBLX Tools > **Open Cloud
+   API Key**, or into Sidebar > Roblox > Import & Assets.
+4. Make sure Blender's **Allow Online Access** is on (Preferences > System >
+   Network).
+
+The key is stored in your Blender preferences and only sent to
+`apis.roblox.com`. Downloaded files go to the cache folder shown in the
+preferences (you can clear it there).
+
+Without a key, the addon still uses:
+- **Asset Folder**: files you've saved yourself, named by asset id. For example
   `12345678.png`, `12345678.mesh`, or `Sword_12345678.mesh`. Subfolders are
   searched too, and files don't need an extension.
-- **Roblox Studio content**: built-in `rbxasset://` paths are found
-  automatically from your Roblox Studio install.
+- **Roblox Studio content**: built-in `rbxasset://` files, the classic head
+  mesh and the R15 rig. This works with the normal installer and with
+  Bloxstrap-style launchers (Bloxstrap, Fishstrap, Voidstrap).
 
-Anything it can't find is listed in **Text Editor > RBX Import Report**:
+Anything still missing is listed in **Text Editor > RBX Import Report**, with
+the reason:
 - Missing meshes import as boxes of the right size.
-- Missing decal images import invisible.
+- Missing images import as empty layers.
 
-Once you've added the files to your asset folder, click **Reload Missing
-Assets**.
+**Reload Missing Assets** tries again later.
 
 ## Units and axes
 
@@ -90,12 +122,17 @@ Assets**.
   per stud).
 - Roblox is Y-up and Blender is Z-up. The addon converts between them, and the
   properties panel always shows Roblox values.
+- A Roblox part's front (-Z, its LookVector) faces Blender's front view, so
+  numpad 1 looks a character in the face.
 
 ## Known limitations
 
 - Unions (CSG) import as boxes. Their geometry is stored in a format that isn't
   decoded yet.
-- Draco-compressed meshes (newer `.mesh` v6/v7 uploads) aren't supported yet.
+- Layered clothing (3D shirts/jackets) and dynamic heads import as rigid meshes
+  attached to the body. They don't deform with it.
+- R15 avatar body scales (height, width, head) are applied approximately.
+  Body type and proportion blending isn't.
 - Terrain isn't imported.
 - The lighting is an approximation of Roblox's renderer in Blender, not an
   exact match.
@@ -105,12 +142,11 @@ Assets**.
 - **Moon Animator 2 / Eclipse Animator animations**
   - Option 1: import animations exported from Studio. You build the animation
     with the plugin, save the animated rig or model, and the addon turns its
-    KeyframeSequences into Blender keyframes.
+    KeyframeSequences into keyframes on the rig's bones. Rigs already store
+    each joint's C0/C1 for this.
   - Option 2: recreate the plugins' motion in Blender, by reading how each
     plugin generates its animation and rebuilding it as Blender keyframes.
-- R6/R15 character rigs imported as armatures, with Motor6D joints as bones.
-- Union/CSG geometry, Draco meshes, and Terrain.
-- `.obj`/`.fbx` meshes in the asset folder.
+- Union/CSG geometry, layered clothing deformation, and Terrain.
 - Exporting back to Roblox.
 - Bloom, ColorCorrection, SunRays and DepthOfField post effects.
 

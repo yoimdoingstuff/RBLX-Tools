@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "rblx_tools"
-version = "0.1.0"
+version = "0.2.0"
 name = "RBLX Tools"
 tagline = "Import Roblox models and places, with Roblox lighting and parts"
 maintainer = "RBLX-Tools contributors"
@@ -14,3 +14,4 @@ tags = ["Import-Export", "Lighting", "Object"]
 
 [permissions]
 files = "Import Roblox files, meshes and images from disk"
+network = "Download Roblox meshes, images and avatars"

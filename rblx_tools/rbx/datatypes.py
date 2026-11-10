@@ -15,6 +15,36 @@ class CFrame:
     def __repr__(self):
         return "CFrame(pos=%r, rot=%r)" % (self.pos, self.rot)
 
+    def __mul__(self, other):
+        a = self.rot
+        b = other.rot
+        rot = tuple(
+            a[r * 3 + 0] * b[0 * 3 + c] + a[r * 3 + 1] * b[1 * 3 + c] + a[r * 3 + 2] * b[2 * 3 + c]
+            for r in range(3) for c in range(3))
+        p = other.pos
+        pos = tuple(a[r * 3] * p[0] + a[r * 3 + 1] * p[1] + a[r * 3 + 2] * p[2] + self.pos[r]
+                    for r in range(3))
+        return CFrame(pos, rot)
+
+    def inverse(self):
+        a = self.rot
+        rt = (a[0], a[3], a[6], a[1], a[4], a[7], a[2], a[5], a[8])
+        p = self.pos
+        pos = tuple(-(rt[r * 3] * p[0] + rt[r * 3 + 1] * p[1] + rt[r * 3 + 2] * p[2]) for r in range(3))
+        return CFrame(pos, rt)
+
+    @staticmethod
+    def from_pos(x, y, z):
+        return CFrame((x, y, z))
+
+    @staticmethod
+    def from_values(*v):
+        """CFrame.new(x, y, z, R00, R01, R02, R10, R11, R12, R20, R21, R22)"""
+        return CFrame(v[0:3], v[3:12])
+
+    def scaled_pos(self, sx, sy, sz):
+        return CFrame((self.pos[0] * sx, self.pos[1] * sy, self.pos[2] * sz), self.rot)
+
 
 class Ref:
     """Unresolved reference to another instance (by referent)."""
@@ -74,6 +104,24 @@ class Instance:
 
     def __repr__(self):
         return "<%s %r>" % (self.class_name, self.name)
+
+    def add_child(self, child):
+        if child.parent is not None and child in child.parent.children:
+            child.parent.children.remove(child)
+        child.parent = self
+        self.children.append(child)
+        return child
+
+    def remove(self):
+        if self.parent is not None and self in self.parent.children:
+            self.parent.children.remove(self)
+        self.parent = None
+
+    def find_first_descendant(self, name=None, class_names=None):
+        for d in self.descendants():
+            if (name is None or d.name == name) and (class_names is None or d.class_name in class_names):
+                return d
+        return None
 
 
 class Document:
