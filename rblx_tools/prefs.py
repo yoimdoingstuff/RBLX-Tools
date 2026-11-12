@@ -1,5 +1,5 @@
 import bpy
-from bpy.props import BoolProperty, FloatProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, StringProperty
 
 ADDON_ID = __package__
 
@@ -47,8 +47,34 @@ def cookie_owner():
     return bpy.context.window_manager, "rblx_session_cookie"
 
 
+def _on_panel_location(self, context):
+    from . import panels
+    panels.reregister()
+
+
+PANEL_LOCATIONS = [
+    ("PROPERTIES", "Properties Editor (Tool tab)",
+     "Show the Roblox panels in the Properties Editor's Tool tab, next to Render, Modifiers, ... "
+     "so the 3D View sidebar can stay closed"),
+    ("SIDEBAR", "3D View Sidebar (Roblox tab)", "Show the Roblox panels in the 3D View's N panel"),
+]
+
+
 class RBLX_AddonPreferences(bpy.types.AddonPreferences):
     bl_idname = ADDON_ID
+
+    panel_location: EnumProperty(
+        name="Roblox Panels", items=PANEL_LOCATIONS, default="PROPERTIES",
+        update=_on_panel_location,
+        description="Where the Roblox panels are shown")
+    studio_camera: BoolProperty(
+        name="Studio Camera Controls", default=True,
+        description="In Build Mode: WASD/QE to move, hold right mouse to look, middle mouse to "
+                    "pan, scroll to zoom toward the cursor, like Roblox Studio. Off: Blender's "
+                    "own navigation")
+    camera_speed: FloatProperty(
+        name="Camera Speed", default=20.0, min=0.5, max=2000.0, soft_max=200.0,
+        description="Studio camera speed in studs per second (scroll while moving to change it)")
 
     api_key: StringProperty(
         name="Open Cloud API Key", subtype="PASSWORD", default="",
@@ -92,6 +118,10 @@ class RBLX_AddonPreferences(bpy.types.AddonPreferences):
                     "Studio install")
 
     def draw(self, context):
+        self.layout.prop(self, "panel_location")
+        row = self.layout.row()
+        row.prop(self, "studio_camera")
+        row.prop(self, "camera_speed")
         draw_download_settings(self.layout, context, full=True)
 
         from . import assets, draco

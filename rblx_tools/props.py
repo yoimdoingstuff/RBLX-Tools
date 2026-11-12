@@ -181,6 +181,24 @@ def _noop(self, context):
     pass
 
 
+def _on_material_style(self, context):
+    from . import materials
+    materials.apply_material_style(self.id_data)
+
+
+@contextlib.contextmanager
+def no_propagation():
+    """Set properties on several objects without Studio-style multi-editing
+    copying the active object's value onto the others."""
+    global _propagating
+    old = _propagating
+    _propagating = True
+    try:
+        yield
+    finally:
+        _propagating = old
+
+
 def _get_position(self):
     obj = self.id_data
     pos, _ = coords.matrix_to_rbx(obj.matrix_world, coords.stud_scale())
@@ -380,6 +398,26 @@ class RBLX_SceneProps(bpy.types.PropertyGroup):
         name="Edit All Selected", default=True,
         description="Like Roblox Studio: changing a property of the active part changes it on "
                     "every selected part")
+    use_2022_materials: BoolProperty(
+        name="2022 Materials", default=True, update=_on_material_style,
+        description="MaterialService.Use2022Materials: on, parts use Roblox's 2022 material "
+                    "look; off, the older (pre-2022) materials")
+
+    # Build mode (Studio-style dragging and handles)
+    snap_move: BoolProperty(name="Snap Move", default=True,
+                            description="Move and resize in steps of the Move increment")
+    move_increment: FloatProperty(name="Move", default=1.0, min=0.001, soft_max=64.0,
+                                  precision=3, description="Move/resize step, in studs")
+    snap_rotate: BoolProperty(name="Snap Rotate", default=True,
+                              description="Rotate in steps of the Rotate increment")
+    rotate_increment: FloatProperty(name="Rotate", default=15.0, min=0.01, max=180.0,
+                                    precision=2, description="Rotation step, in degrees")
+    handle_space: EnumProperty(
+        name="Space", default="WORLD",
+        items=[("WORLD", "World", "Move/Rotate handles follow the world axes", "WORLD", 0),
+               ("LOCAL", "Local", "Move/Rotate handles follow the part's own axes",
+                "OBJECT_DATA", 1)],
+        description="Axes the Move and Rotate handles use (Ctrl+L in Studio)")
 
 
 CLASSES = (RBLX_TextureLayer, RBLX_ObjectProps, RBLX_SceneProps)

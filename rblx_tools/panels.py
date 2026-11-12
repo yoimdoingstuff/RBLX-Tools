@@ -1,17 +1,24 @@
-"""UI: View3D > Sidebar (N) > Roblox, and Properties Editor > Object > Roblox."""
+"""UI panels.
+
+Blender doesn't let add-ons add their own tab to the Properties Editor, so by
+default the Roblox panels go in its Tool tab (panels in the 3D View's "Tool"
+category are shown there too). The preference "Roblox Panels" moves them to
+the 3D View sidebar's own Roblox tab instead. Part properties are also in
+Properties Editor > Object."""
 
 import bpy
 
-from . import assets, prefs
+from . import build, prefs
 from .props import SHAPE_ITEMS
 
 CATEGORY = "Roblox"
+TOOL_CATEGORY = "Tool"
 
 
 class _RBLXPanel:
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = CATEGORY
+    bl_category = TOOL_CATEGORY
 
 
 def _scale_mismatch(obj):
@@ -95,6 +102,7 @@ def _draw_part(layout, context, obj):
         row.operator("rblx.use_roblox_material", text="", icon="LOOP_BACK")
     col.prop(r, "reflectance", slider=True)
     col.prop(r, "transparency", slider=True)
+    col.prop(context.scene.rblx, "use_2022_materials", text="2022 Materials (all parts)")
 
     col = _section(layout, "Data", "OBJECT_DATA")
     row = col.row()
@@ -148,9 +156,37 @@ def _draw_light(layout, obj):
     col.label(text="Roblox Brightness %.2f, Range %.1f" % (r.light_brightness, r.light_range))
 
 
+class RBLX_PT_build(_RBLXPanel, bpy.types.Panel):
+    bl_label = "Build"
+    bl_order = 10
+
+    def draw(self, context):
+        layout = self.layout
+        on = build.is_on()
+        row = layout.row()
+        row.scale_y = 1.4
+        row.operator("rblx.toggle_build_mode", text="Build Mode: " + ("On" if on else "Off"),
+                     icon="MOD_BUILD", depress=on)
+        if on:
+            col = layout.column(align=True)
+            col.scale_y = 0.8
+            col.label(text="Tools are in the toolbar (T)", icon="TOOL_SETTINGS")
+            col.label(text="Click: Model, Alt+click: part")
+            col.label(text="Drag to move, R / T to turn")
+        build.draw_snap_settings(layout, context)
+        layout.operator("rblx.stud_grid", icon="GRID")
+        p = prefs.get()
+        if p is not None:
+            col = _section(layout, "Studio Camera", "VIEW_CAMERA")
+            col.prop(p, "studio_camera", text="WASD / Right-Mouse Look")
+            sub = col.column()
+            sub.active = p.studio_camera
+            sub.prop(p, "camera_speed", text="Speed (studs/s)")
+
+
 class RBLX_PT_properties(_RBLXPanel, bpy.types.Panel):
     bl_label = "Properties"
-    bl_order = 0
+    bl_order = 11
 
     def draw(self, context):
         draw_properties(self.layout, context, context.active_object)
@@ -253,7 +289,7 @@ def draw_textures(layout, context, obj):
 
 class RBLX_PT_textures(_RBLXPanel, bpy.types.Panel):
     bl_label = "Textures"
-    bl_order = 1
+    bl_order = 12
 
     @classmethod
     def poll(cls, context):
@@ -269,7 +305,7 @@ class RBLX_PT_textures(_RBLXPanel, bpy.types.Panel):
 
 class RBLX_PT_character(_RBLXPanel, bpy.types.Panel):
     bl_label = "Character"
-    bl_order = 2
+    bl_order = 13
 
     @classmethod
     def poll(cls, context):
@@ -294,7 +330,7 @@ class RBLX_PT_character(_RBLXPanel, bpy.types.Panel):
 
 class RBLX_PT_add(_RBLXPanel, bpy.types.Panel):
     bl_label = "Insert"
-    bl_order = 3
+    bl_order = 14
     bl_options = {"DEFAULT_CLOSED"}
 
     def draw(self, context):
@@ -315,7 +351,7 @@ class RBLX_PT_add(_RBLXPanel, bpy.types.Panel):
 
 class RBLX_PT_lighting(_RBLXPanel, bpy.types.Panel):
     bl_label = "Lighting"
-    bl_order = 4
+    bl_order = 15
     bl_options = {"DEFAULT_CLOSED"}
 
     def draw(self, context):
@@ -378,14 +414,17 @@ class RBLX_PT_lighting_sky(_RBLXPanel, bpy.types.Panel):
 
 class RBLX_PT_import(_RBLXPanel, bpy.types.Panel):
     bl_label = "Import & Assets"
-    bl_order = 5
+    bl_order = 16
 
     def draw(self, context):
         layout = self.layout
         layout.operator("import_scene.rblx", text="Import Roblox File", icon="IMPORT")
         layout.prop(context.scene.rblx, "stud_scale")
+        layout.prop(context.scene.rblx, "use_2022_materials")
 
         p = prefs.get()
+        if p is not None:
+            layout.prop(p, "panel_location", text="Panels")
         prefs.draw_download_settings(layout, context)
         col = _section(layout, "Local Files", "FILE_FOLDER")
         if p is not None:
@@ -403,6 +442,7 @@ class RBLX_PT_import(_RBLXPanel, bpy.types.Panel):
 
 CLASSES = (
     RBLX_UL_layers,
+    RBLX_PT_build,
     RBLX_PT_properties,
     RBLX_PT_object_properties,
     RBLX_PT_textures,
@@ -413,12 +453,37 @@ CLASSES = (
     RBLX_PT_import,
 )
 
+# Panels that move between the Properties Editor's Tool tab and the sidebar
+MOVABLE = tuple(c for c in CLASSES if issubclass(c, _RBLXPanel))
+_BASE_LABELS = {c: c.bl_label for c in MOVABLE}
+
+
+def location():
+    p = prefs.get()
+    return getattr(p, "panel_location", "PROPERTIES") if p is not None else "PROPERTIES"
+
+
+def _configure():
+    in_tool_tab = location() == "PROPERTIES"
+    for c in MOVABLE:
+        c.bl_category = TOOL_CATEGORY if in_tool_tab else CATEGORY
+        base = _BASE_LABELS[c]
+        # In the shared Tool tab, say which panels are Roblox's
+        c.bl_label = ("Roblox " + base) if in_tool_tab and not hasattr(c, "bl_parent_id") else base
+
 
 def register():
+    _configure()
     for c in CLASSES:
         bpy.utils.register_class(c)
 
 
 def unregister():
     for c in reversed(CLASSES):
-        bpy.utils.unregister_class(c)
+        if getattr(c, "is_registered", False):
+            bpy.utils.unregister_class(c)
+
+
+def reregister():
+    unregister()
+    register()

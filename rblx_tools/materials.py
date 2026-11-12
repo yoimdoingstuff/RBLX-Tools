@@ -223,10 +223,28 @@ def _image_node(nt, img, loc, extension="REPEAT", box_projection_scale=None):
     return tex
 
 
-def _find_material_textures(folder, name):
-    """Look for <name>.png / <name>_color.png / _normal / _roughness / _metalness."""
+def material_style(scene=None):
+    """"2022" (MaterialService.Use2022Materials on, Roblox's default) or "LEGACY"."""
+    if scene is None:
+        scene = getattr(bpy.context, "scene", None)
+    try:
+        return "2022" if scene.rblx.use_2022_materials else "LEGACY"
+    except AttributeError:
+        return "2022"
+
+
+STYLE_FOLDERS = {"2022": ("2022",), "LEGACY": ("Legacy", "Classic", "Old")}
+
+
+def _find_material_textures(folder, name, style="2022"):
+    """Look for <name>.png / <name>_color.png / _normal / _roughness / _metalness,
+    first in the style's subfolder (2022/ or Legacy/), then in the folder itself."""
     if not folder or not os.path.isdir(folder):
         return {}
+    for sub in STYLE_FOLDERS.get(style, ()):
+        found = _find_material_textures(os.path.join(folder, sub), name, None)
+        if found:
+            return found
     exts = (".png", ".jpg", ".jpeg", ".tga", ".bmp", ".webp")
     roles = {
         "color": ("", "_color", "_albedo", "_diffuse", "_basecolor"),
@@ -251,13 +269,232 @@ def _find_material_textures(folder, name):
 # ---------------------------------------------------------------------------
 # Shared Roblox-material shading
 
-def _part_shading(nt, bsdf, name, base_color, alpha):
+# Procedural surface detail per material: (pattern, scale per stud, colour
+# variation, bump strength). 2022 materials are finer and subtler; the
+# pre-2022 ("legacy") set has bolder, chunkier patterns.
+DETAIL_2022 = {
+    "Wood": ("wood", 0.6, 0.18, 0.04),
+    "WoodPlanks": ("planks", 1.0, 0.2, 0.08),
+    "Marble": ("marble", 0.4, 0.15, 0.02),
+    "Brick": ("brick", 1.0, 0.18, 0.15),
+    "Pavement": ("tiles", 0.5, 0.1, 0.12),
+    "Cobblestone": ("stones", 0.8, 0.25, 0.3),
+    "Pebble": ("stones", 2.0, 0.2, 0.25),
+    "CrackedLava": ("stones", 0.6, 0.35, 0.25),
+    "DiamondPlate": ("plate", 2.0, 0.08, 0.15),
+    "Concrete": ("noise", 4.0, 0.08, 0.1),
+    "Slate": ("noise", 1.5, 0.15, 0.2),
+    "Basalt": ("noise", 2.0, 0.15, 0.2),
+    "Rock": ("noise", 1.5, 0.2, 0.3),
+    "Granite": ("noise", 6.0, 0.12, 0.08),
+    "Limestone": ("noise", 3.0, 0.1, 0.1),
+    "Sandstone": ("noise", 2.0, 0.12, 0.12),
+    "Grass": ("noise", 8.0, 0.15, 0.15),
+    "LeafyGrass": ("noise", 5.0, 0.2, 0.2),
+    "Sand": ("noise", 12.0, 0.08, 0.08),
+    "Snow": ("noise", 4.0, 0.05, 0.06),
+    "Mud": ("noise", 3.0, 0.15, 0.1),
+    "Ground": ("noise", 4.0, 0.15, 0.1),
+    "Asphalt": ("noise", 14.0, 0.1, 0.08),
+    "Salt": ("noise", 10.0, 0.08, 0.08),
+    "Fabric": ("noise", 20.0, 0.08, 0.05),
+    "CorrodedMetal": ("noise", 3.0, 0.3, 0.2),
+    "Foil": ("noise", 6.0, 0.05, 0.05),
+    "Ice": ("noise", 1.0, 0.05, 0.02),
+    "Glacier": ("noise", 1.0, 0.05, 0.02),
+}
+DETAIL_LEGACY_OVERRIDES = {
+    "Wood": ("wood", 0.35, 0.35, 0.06),
+    "WoodPlanks": ("planks", 0.5, 0.35, 0.12),
+    "Brick": ("brick", 0.5, 0.3, 0.2),
+    "DiamondPlate": ("plate", 1.0, 0.12, 0.25),
+}
+
+
+def surface_detail(name, style):
+    if style == "LEGACY":
+        if name in DETAIL_LEGACY_OVERRIDES:
+            return DETAIL_LEGACY_OVERRIDES[name]
+        d = DETAIL_2022.get(name)
+        if d is None:
+            return None
+        return (d[0], d[1] * 0.5, min(d[2] * 1.8, 0.6), d[3] * 1.4)
+    return DETAIL_2022.get(name)
+
+
+def _planar_coords(nt, tc, vec, loc):
+    """2D coordinates that follow the part's faces (x,y on top/bottom, x,z on
+    front/back, y,z on the sides), so brick-like patterns work on every face."""
+    x, y = loc
+    absn = _vmath(nt, "ABSOLUTE", (x, y - 200))
+    _link(nt, tc.outputs["Normal"], absn.inputs[0])
+    n = nt.nodes.new("ShaderNodeSeparateXYZ")
+    n.location = (x + 180, y - 200)
+    _link(nt, absn.outputs["Vector"], n.inputs[0])
+    p = nt.nodes.new("ShaderNodeSeparateXYZ")
+    p.location = (x + 180, y)
+    _link(nt, vec, p.inputs[0])
+
+    def gt(a, b, dx):
+        m = _math(nt, "GREATER_THAN", loc=(x + 360 + dx, y - 300))
+        _link(nt, a, m.inputs[0])
+        _link(nt, b, m.inputs[1])
+        return m.outputs[0]
+
+    def both(a, b, dx):
+        m = _math(nt, "MULTIPLY", loc=(x + 520 + dx, y - 300))
+        _link(nt, a, m.inputs[0])
+        _link(nt, b, m.inputs[1])
+        return m.outputs[0]
+
+    wx = both(gt(n.outputs["X"], n.outputs["Y"], 0), gt(n.outputs["X"], n.outputs["Z"], 40), 0)
+    wz = both(gt(n.outputs["Z"], n.outputs["X"], 80), gt(n.outputs["Z"], n.outputs["Y"], 120), 40)
+
+    def pick(a, b, w, dy):  # a + w * (b - a)
+        d = _math(nt, "SUBTRACT", loc=(x + 680, y + dy))
+        _link(nt, b, d.inputs[0])
+        _link(nt, a, d.inputs[1])
+        m = _math(nt, "MULTIPLY_ADD", loc=(x + 840, y + dy))
+        _link(nt, d.outputs[0], m.inputs[0])
+        _link(nt, w, m.inputs[1])
+        _link(nt, a, m.inputs[2])
+        return m.outputs[0]
+
+    comb = nt.nodes.new("ShaderNodeCombineXYZ")
+    comb.location = (x + 1000, y)
+    _link(nt, pick(p.outputs["X"], p.outputs["Y"], wx, 0), comb.inputs["X"])
+    _link(nt, pick(p.outputs["Z"], p.outputs["Y"], wz, -150), comb.inputs["Y"])
+    return comb.outputs["Vector"]
+
+
+def _map(nt, sock, a, b, c, d, loc):
+    m = nt.nodes.new("ShaderNodeMapRange")
+    m.location = loc
+    m.clamp = True
+    m.inputs["From Min"].default_value = a
+    m.inputs["From Max"].default_value = b
+    m.inputs["To Min"].default_value = c
+    m.inputs["To Max"].default_value = d
+    _link(nt, sock, m.inputs["Value"])
+    return m.outputs["Result"]
+
+
+def _wave(nt, vec, scale, distortion, detail, loc):
+    w = nt.nodes.new("ShaderNodeTexWave")
+    w.location = loc
+    w.wave_type = "BANDS"
+    w.bands_direction = "X"
+    w.inputs["Scale"].default_value = scale
+    w.inputs["Distortion"].default_value = distortion
+    w.inputs["Detail"].default_value = detail
+    _link(nt, vec, w.inputs["Vector"])
+    return w.outputs["Fac"]
+
+
+def _brick(nt, vec, scale, width, height, mortar, offset, loc):
+    b = nt.nodes.new("ShaderNodeTexBrick")
+    b.location = loc
+    b.offset = offset
+    b.inputs["Color1"].default_value = (0.0, 0.0, 0.0, 1.0)
+    b.inputs["Color2"].default_value = (0.4, 0.4, 0.4, 1.0)
+    b.inputs["Mortar"].default_value = (1.0, 1.0, 1.0, 1.0)
+    b.inputs["Scale"].default_value = scale
+    b.inputs["Mortar Size"].default_value = mortar
+    b.inputs["Brick Width"].default_value = width
+    b.inputs["Row Height"].default_value = height
+    _link(nt, vec, b.inputs["Vector"])
+    bw = nt.nodes.new("ShaderNodeRGBToBW")
+    bw.location = (loc[0] + 200, loc[1])
+    _link(nt, b.outputs["Color"], bw.inputs["Color"])
+    inv = _math(nt, "SUBTRACT", a=1.0, loc=(loc[0] + 200, loc[1] - 150))
+    _link(nt, b.outputs["Fac"], inv.inputs[1])
+    return bw.outputs["Val"], inv.outputs[0]  # darkness, height
+
+
+def _pattern(nt, kind, scale, loc):
+    """Build a procedural pattern in stud space. Returns (darkness 0..1, height)."""
+    x, y = loc
+    tc = nt.nodes.new("ShaderNodeTexCoord")
+    tc.location = (x - 600, y)
+    studs = _vmath(nt, "SCALE", (x - 400, y))
+    studs.inputs["Scale"].default_value = 1.0 / max(coords.stud_scale(), 1e-4)
+    _link(nt, tc.outputs["Object"], studs.inputs[0])
+    vec = studs.outputs["Vector"]
+
+    if kind == "noise":
+        n = nt.nodes.new("ShaderNodeTexNoise")
+        n.location = (x, y)
+        n.inputs["Scale"].default_value = scale
+        n.inputs["Detail"].default_value = 6.0
+        _link(nt, vec, n.inputs["Vector"])
+        return _map(nt, n.outputs["Fac"], 0.35, 0.65, 0.0, 1.0, (x + 200, y)), n.outputs["Fac"]
+    if kind == "wood":
+        grain = _wave(nt, vec, scale, 6.0, 2.0, (x, y))
+        dark = _math(nt, "POWER", b=3.0, loc=(x + 200, y))
+        _link(nt, grain, dark.inputs[0])
+        return dark.outputs[0], dark.outputs[0]
+    if kind == "marble":
+        veins = _wave(nt, vec, scale, 15.0, 6.0, (x, y))
+        dark = _math(nt, "POWER", b=4.0, loc=(x + 200, y))
+        _link(nt, veins, dark.inputs[0])
+        return dark.outputs[0], dark.outputs[0]
+    if kind in ("planks", "brick", "tiles"):
+        uv = _planar_coords(nt, tc, vec, (x - 1200, y - 400))
+        if kind == "planks":
+            dark, height = _brick(nt, uv, scale, 4.0, 1.0, 0.015, 0.5, (x, y))
+            grain = _wave(nt, vec, scale * 1.5, 6.0, 2.0, (x, y - 300))
+            g = _math(nt, "MULTIPLY", b=0.6, loc=(x + 200, y - 300))
+            _link(nt, grain, g.inputs[0])
+            mx = _math(nt, "MAXIMUM", loc=(x + 400, y))
+            _link(nt, dark, mx.inputs[0])
+            _link(nt, g.outputs[0], mx.inputs[1])
+            return mx.outputs[0], height
+        if kind == "brick":
+            return _brick(nt, uv, scale, 2.0, 1.0, 0.06, 0.5, (x, y))
+        return _brick(nt, uv, scale, 1.0, 1.0, 0.03, 0.0, (x, y))
+    if kind in ("stones", "plate"):
+        v = nt.nodes.new("ShaderNodeTexVoronoi")
+        v.location = (x, y)
+        v.inputs["Scale"].default_value = scale
+        _link(nt, vec, v.inputs["Vector"])
+        if kind == "stones":
+            v.feature = "DISTANCE_TO_EDGE"
+            edge = _map(nt, v.outputs["Distance"], 0.0, 0.12, 1.0, 0.0, (x + 200, y))
+            height = _map(nt, v.outputs["Distance"], 0.0, 0.12, 0.0, 1.0, (x + 200, y - 200))
+            return edge, height
+        v.inputs["Randomness"].default_value = 0.0
+        bump = _map(nt, v.outputs["Distance"], 0.0, 0.35, 1.0, 0.0, (x + 200, y))
+        dark = _math(nt, "MULTIPLY", b=0.3, loc=(x + 400, y))
+        _link(nt, bump, dark.inputs[0])
+        return dark.outputs[0], bump
+    return None, None
+
+
+def _part_shading(nt, bsdf, name, base_color, alpha, style=None):
     """Wire the Roblox material look into `bsdf`. `base_color` is a colour
     socket (the part colour, possibly with layers); `alpha` an alpha socket."""
-    rough, metal, bump_strength, bump_scale, extra = PRESETS.get(name, PRESETS["Plastic"])
+    style = style or material_style()
+    rough, metal, _bump_strength, _bump_scale, extra = PRESETS.get(name, PRESETS["Plastic"])
+    if style == "LEGACY" and metal < 0.5:
+        rough = min(1.0, rough + 0.08)  # the old materials were a little less glossy
     p = prefs.get()
-    textures = _find_material_textures(bpy.path.abspath(p.material_folder) if p else "", name)
+    textures = _find_material_textures(bpy.path.abspath(p.material_folder) if p else "", name,
+                                       style)
     tile = 1.0 / max((p.material_tile_studs if p else 4.0), 0.01) / coords.stud_scale()
+
+    detail = None if "color" in textures else surface_detail(name, style)
+    height = None
+    if detail is not None:
+        kind, dscale, var, bump_strength = detail
+        dark, height = _pattern(nt, kind, dscale, (-700, 1100))
+        if dark is not None:
+            f = _math(nt, "MULTIPLY", b=var, loc=(-100, 900))
+            _link(nt, dark, f.inputs[0])
+            shade = _mix_rgb(nt, "MIX", (100, 700))
+            shade.inputs["B"].default_value = (0.0, 0.0, 0.0, 1.0)
+            _link(nt, f.outputs[0], shade.inputs["Factor"])
+            _link(nt, base_color, shade.inputs["A"])
+            base_color = shade.outputs["Result"]
 
     if "color" in textures:
         img = load_image(textures["color"])
@@ -303,15 +540,13 @@ def _part_shading(nt, bsdf, name, base_color, alpha):
             nmap.location = (300, -800)
             _link(nt, tex.outputs["Color"], nmap.inputs["Color"])
             _link(nt, nmap.outputs["Normal"], bsdf.inputs["Normal"])
-    elif bump_strength > 0.0:
-        noise = nt.nodes.new("ShaderNodeTexNoise")
-        noise.location = (0, -650)
-        noise.inputs["Scale"].default_value = bump_scale / max(coords.stud_scale(), 1e-4)
-        noise.inputs["Detail"].default_value = 6.0
+    elif height is not None and detail[3] > 0.0:
         bump = nt.nodes.new("ShaderNodeBump")
         bump.location = (300, -650)
-        bump.inputs["Strength"].default_value = bump_strength
-        _link(nt, noise.outputs["Fac"], bump.inputs["Height"])
+        bump.inputs["Strength"].default_value = detail[3]
+        if "Distance" in bump.inputs:
+            bump.inputs["Distance"].default_value = 0.05 * coords.stud_scale()
+        _link(nt, height, bump.inputs["Height"])
         _link(nt, bump.outputs["Normal"], bsdf.inputs["Normal"])
 
     if extra.get("emission"):
@@ -349,12 +584,17 @@ def _base_sockets(nt):
 def part_material(name):
     """Shared material for a Roblox material type."""
     mat_name = "RBX " + name
+    style = material_style()
     mat = bpy.data.materials.get(mat_name)
     if mat is not None:
-        return mat
-    mat, nt, bsdf = _new_material(mat_name)
+        if mat.get("rblx_style", "2022") == style or not mat.get("rblx_managed"):
+            return mat
+        nt, bsdf = _init_tree(mat)  # rebuild in place for the other material style
+    else:
+        mat, nt, bsdf = _new_material(mat_name)
+    mat["rblx_style"] = style
     color, alpha = _base_sockets(nt)
-    rough, metal = _part_shading(nt, bsdf, name, color, alpha)
+    rough, metal = _part_shading(nt, bsdf, name, color, alpha, style)
     mat.diffuse_color = (0.64, 0.64, 0.65, 1.0)
     mat.roughness = rough
     mat.metallic = metal
@@ -532,8 +772,10 @@ def _build_layered(mat, obj):
         _link(nt, alpha, acc.inputs[2])
         alpha = acc.outputs[0]
         y -= 700
-    _part_shading(nt, bsdf, obj.rblx.material, color, alpha)
+    style = material_style()
+    _part_shading(nt, bsdf, obj.rblx.material, color, alpha, style)
     mat["rblx_layered"] = True
+    mat["rblx_style"] = style
     mat.diffuse_color = (*obj.rblx.color, 1.0)
 
 
@@ -564,6 +806,19 @@ def refresh(obj):
         assign(obj, part_material(r.material))
         if old is not None and old.get("rblx_layered") and old.users == 0:
             bpy.data.materials.remove(old)
+
+
+def apply_material_style(scene):
+    """Rebuild every Roblox material for the scene's material style
+    (MaterialService.Use2022Materials)."""
+    for obj in scene.objects:
+        if obj.rblx.kind == "PART" and obj.type == "MESH" and obj.rblx.material_mode != "SURFACE":
+            refresh(obj)
+    style = material_style(scene)
+    for mat in list(bpy.data.materials):  # shared materials no part uses right now
+        if (mat.get("rblx_managed") and not mat.get("rblx_layered") and mat.name.startswith("RBX ")
+                and mat.name[4:] in PRESETS and mat.get("rblx_style", "2022") != style):
+            part_material(mat.name[4:])
 
 
 # ---------------------------------------------------------------------------

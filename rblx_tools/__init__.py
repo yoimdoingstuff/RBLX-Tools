@@ -4,9 +4,9 @@
 bl_info = {
     "name": "RBLX Tools",
     "author": "RBLX-Tools contributors",
-    "version": (0, 3, 0),
+    "version": (0, 4, 0),
     "blender": (4, 2, 0),
-    "location": "View3D > Sidebar > Roblox, File > Import > Roblox, Add > Roblox",
+    "location": "Properties > Tool, View3D header > Build, File > Import > Roblox, Add > Roblox",
     "description": "Import Roblox models, places and avatars; Roblox lighting, part properties "
                    "and textures",
     "category": "Import-Export",
@@ -23,10 +23,10 @@ for _name in [n for n in sys.modules if n.startswith(__name__ + ".")]:
 
 import bpy
 
-from . import (assets, character, coords, download, draco, geometry, importer, lighting,
-               materials, operators, panels, prefs, props, rbx)
+from . import (assets, build, character, coords, download, draco, geometry, importer, lighting,
+               materials, operators, panels, prefs, props, rbx, studio)
 
-_MODULES = (draco, prefs, props, lighting, operators, panels)
+_MODULES = (draco, prefs, props, lighting, operators, build, studio, panels)
 
 
 def register():

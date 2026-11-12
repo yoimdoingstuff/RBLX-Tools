@@ -47,8 +47,62 @@ Tested on Blender 5.2. Needs Blender 4.2 or newer.
     yet.
   - R6 body parts get the same rounded edges Roblox gives them. Any block can
     use this through the part's **Bevel** property.
-- **Studio-style properties** (Sidebar > Roblox > Properties, and Properties
-  Editor > Object > Roblox):
+- **Where the panels are**: Blender doesn't let add-ons add their own tab to
+  the Properties Editor, so the Roblox panels (Build, Properties, Textures,
+  Character, Insert, Lighting, Import & Assets) go in its **Tool** tab (the
+  wrench and screwdriver icon at the top). The 3D View sidebar can then stay
+  closed. To get the old 3D View sidebar tab back, set **Roblox Panels** to
+  "3D View Sidebar" in the addon preferences or in Import & Assets.
+- **Build Mode**: turn it on and off with the **Build** button in the 3D View
+  header or the Roblox Build panel. While it's off, Blender works as usual.
+  While it's on, four Studio-style tools appear in the toolbar (T):
+  - **Roblox Select**:
+    - Click a part to select its Model, like Studio. Alt+click selects the
+      part itself; Shift or Ctrl+click adds to the selection.
+    - Drag a part to slide it over other surfaces. It lands on whatever is
+      under the cursor and its corner snaps to the stud grid.
+    - While dragging, **R** rotates and **T** tilts by 90°. Esc or right-click
+      cancels the drag.
+    - Dragging on empty space draws a selection box.
+  - **Roblox Move**: arrow handles move the selection along an axis in Move
+    increments.
+  - **Roblox Scale**: ball handles resize one face of a part, keeping the
+    opposite face in place. Hold Ctrl to resize both sides.
+  - **Roblox Rotate**: rings rotate in Rotate increments.
+  - **Snapping**: Move (default 1 stud) and Rotate (default 15°) increments
+    can each be turned off. **World/Local** sets the handle axes (Ctrl+L).
+    **Show Stud Grid** makes the viewport grid one stud per square.
+  - **Studio toolbar**: the row at the top of the 3D View, in this order:
+    - Part buttons: one click inserts a Block, Sphere, Wedge, Corner Wedge or
+      Cylinder. Like Studio, the new part lands on the surface in the middle of
+      the view, snapped to the grid and selected. Insert again and it stacks on
+      top.
+    - The four tools, then the Move and Rotate snapping and World/Local.
+    - For the selected part: Material, Color, Anchored and Locked.
+    - Group and Ungroup.
+    On a narrow screen, Ctrl+scroll over the row to see the rest.
+  - **Studio camera** (on by default; turn off in the Build panel or the addon
+    preferences):
+    - **W A S D** move, **Q / E** go down / up, and holding **Shift** goes
+      slower.
+    - **Scroll while moving** changes the camera speed (shown in the header).
+      The speed is remembered.
+    - Hold **right mouse** to look around; WASD keeps working while you do. A
+      right click that doesn't move still opens the context menu.
+    - **Middle mouse** pans, Shift+middle mouse orbits like Blender, and
+      **scroll** zooms toward the cursor.
+    - **F** focuses the selection.
+  - **Studio shortcuts**:
+    - Ctrl+1–4 tools, Ctrl+L World/Local.
+    - Ctrl+D duplicate in place, Ctrl+G group as Model, Ctrl+U ungroup.
+    - Ctrl+R rotate 90°, Ctrl+T tilt 90°.
+    - Delete / Backspace delete, Ctrl+Z / Ctrl+Y undo / redo.
+  - These keys only apply while a Roblox tool is active. Pick a Blender tool,
+    or turn Build Mode off, to get Blender's own keys back. For example, A
+    selects all and Shift+A opens the Add menu again.
+  - Locked parts can't be clicked.
+- **Studio-style properties** (Roblox Properties panel, and Properties Editor >
+  Object > Roblox):
   - Grouped like Studio: Appearance (BrickColor, CastShadow, Color, Material,
     Reflectance, Transparency), Data (ClassName, Name, Position, Orientation),
     Behavior, and Part (Shape, Size).
@@ -56,7 +110,7 @@ Tested on Blender 5.2. Needs Blender 4.2 or newer.
     selected" button turns that off.
   - Color, Transparency and Reflectance can be keyframed: hover over the field
     and press I.
-- **Textures** (Sidebar > Roblox > Textures): every part has a stack of texture
+- **Textures** (Roblox Textures panel): every part has a stack of texture
   layers. Each layer is an image with:
   - **Type**:
     - **Decal**: one face.
@@ -77,14 +131,23 @@ Tested on Blender 5.2. Needs Blender 4.2 or newer.
     the face you dropped it on, or wraps the part if it's a mesh.
   - **Character panel**: Add Shirt / Pants / T-Shirt images (or asset ids) to
     the selected character.
-- **Roblox lighting** (Sidebar > Roblox > Lighting):
+- **Roblox lighting** (Roblox Lighting panel):
   - ClockTime moves the sun and moon. Brightness, Ambient, OutdoorAmbient,
     ColorShift, ShadowSoftness, ExposureCompensation, Fog and Atmosphere work
     like their Studio counterparts.
   - Presets, or load the lighting from any place file.
-- **Roblox materials**: one shared material per Roblox material type.
-  Optionally point the addon at a folder of tileable textures named
-  `Wood.png`, `Wood_normal.png`, ... and they're used automatically.
+- **Roblox materials**: one shared material per Roblox material type, with
+  procedural surface detail (wood grain, bricks, cobblestones, ...).
+  - **2022 Materials**: matches Roblox's `MaterialService.Use2022Materials`.
+    - On (the default) gives the finer, subtler 2022 material look.
+    - Off gives the older, chunkier pre-2022 look.
+    - Imported places use the place's own setting.
+    - The toggle is in the Properties panel (Appearance) and in Import & Assets.
+  - These are procedural stand-ins, not Roblox's actual texture images: Studio
+    downloads those on demand instead of keeping them on disk.
+  - For the real look, point **Material Textures** at a folder of tileable
+    textures named `Wood.png`, `Wood_normal.png`, `Wood_roughness.png`, ...
+    Put them in `2022/` and `Legacy/` subfolders to have a set for each style.
 
 ## Install
 
@@ -94,7 +157,9 @@ Tested on Blender 5.2. Needs Blender 4.2 or newer.
    ```
 2. In Blender, go to Edit > Preferences > Get Extensions, open the ⌄ menu, and
    choose **Install from Disk...**. Pick the zip.
-3. Open the sidebar in the 3D view (N) and select the **Roblox** tab.
+3. In the Properties Editor, open the **Tool** tab (the wrench and screwdriver
+   icon at the top of its tab column). The Roblox panels are there, below
+   Blender's own tool options.
 
 ## Getting meshes and textures
 
@@ -109,7 +174,7 @@ one if an asset is refused:
    2. Add the **Assets** API system with the `legacy-asset:manage`
       permission (only reading is used). Set accepted IP addresses to your
       own IP, or `0.0.0.0/0`.
-   3. Paste the key into Sidebar > Roblox > Import & Assets, or Edit >
+   3. Paste the key into the Roblox Import & Assets panel, or Edit >
       Preferences > Add-ons > RBLX Tools. The key is saved in your Blender
       preferences and only sent to `apis.roblox.com`.
 2. **Your `.ROBLOSECURITY` cookie**: paste it into the **Cookie** field (with

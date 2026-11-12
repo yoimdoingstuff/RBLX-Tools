@@ -175,6 +175,12 @@ class Importer:
                 except Exception as ex:  # keep the import even if rigging fails
                     self.report.warnings.append("%s: rig not built (%s)" % (inst.name, ex))
 
+        # MaterialService.Use2022Materials (places only; models keep the scene's setting)
+        ms = doc.find_service("MaterialService") if is_place else None
+        use_2022 = ms.get("Use2022Materials") if ms is not None else None
+        if isinstance(use_2022, bool) and use_2022 != self.scene.rblx.use_2022_materials:
+            self.scene.rblx.use_2022_materials = use_2022
+
         # Materials once everything (layers, colours) is in place
         for obj in self.objects.values():
             if obj.rblx.kind == "PART" and obj.rblx.material_mode != "SURFACE":

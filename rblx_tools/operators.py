@@ -196,6 +196,9 @@ class RBLX_OT_add_part(bpy.types.Operator):
         obj = create_part(context, self.shape)
         obj.select_set(True)
         context.view_layer.objects.active = obj
+        from . import build
+        if build.is_on():  # like Studio: lands on the surface in the middle of the view
+            build.place_in_view(context, [obj])
         return {"FINISHED"}
 
 

@@ -264,6 +264,8 @@ place = """<roblox version="4">
  <string name="TimeOfDay">17:30:00</string><float name="Brightness">2.5</float><float name="FogEnd">500</float></Properties>
  <Item class="Atmosphere" referent="AT"><Properties><string name="Name">Atmosphere</string><float name="Density">0.35</float></Properties></Item>
 </Item>
+<Item class="MaterialService" referent="MS"><Properties><string name="Name">MaterialService</string>
+ <bool name="Use2022Materials">false</bool></Properties></Item>
 </roblox>"""
 place_path = os.path.join(SCRATCH, "test_place.rbxlx")
 with open(place_path, "w", encoding="utf-8") as fh:
@@ -316,6 +318,9 @@ check(O.get("Ignore me") is None, "Scripts skipped")
 check(abs(L.clock_time - 17.5) < 1e-3 and L.fog_end == 500, "Lighting loaded from place")
 report = bpy.data.texts["RBX Import Report"].as_string()
 check("rbxassetid://9999999" in report, "Report lists the missing asset")
+check(not bpy.context.scene.rblx.use_2022_materials and
+      wall.material_slots[0].material.get("rblx_style") == "LEGACY",
+      "MaterialService.Use2022Materials=false imported (legacy materials)")
 
 with open(os.path.join(assets_dir, "9999999.mesh"), "wb") as fh:
     fh.write(blob)
@@ -538,6 +543,107 @@ if r15 is not None:
           % (box_u[4] if box_u else -1))
 else:
     skip("Roblox Studio not installed: R15 rig")
+
+# ---------------------------------------------------------------- material style (2022 / legacy)
+from rblx_tools import build, panels
+from rblx_tools import materials as M
+scene = bpy.context.scene
+scene.rblx.use_2022_materials = True
+bpy.ops.object.select_all(action="DESELECT")
+bpy.ops.rblx.add_part(shape="BLOCK")
+wood = bpy.context.active_object
+wood.rblx.material = "Wood"
+mat = wood.material_slots[0].material
+
+
+def wave_scale(m):
+    w = next((n for n in m.node_tree.nodes if n.bl_idname == "ShaderNodeTexWave"), None)
+    return w.inputs["Scale"].default_value if w else None
+
+
+s2022 = wave_scale(mat)
+check(mat.get("rblx_style") == "2022" and s2022 is not None, "Wood has 2022-style wood grain")
+scene.rblx.use_2022_materials = False
+mat2 = wood.material_slots[0].material
+check(mat2 == mat and mat.get("rblx_style") == "LEGACY" and wave_scale(mat) not in (None, s2022),
+      "Turning 2022 Materials off rebuilds the same material in the legacy style (%s -> %s)"
+      % (s2022, wave_scale(mat)))
+img = bpy.data.images.new("styletest", 4, 4, alpha=True)
+M.add_layer(wood, image=img, mapping="UV")
+M.refresh(wood)
+lay = wood.material_slots[0].material
+check(lay.get("rblx_layered") and lay.get("rblx_style") == "LEGACY", "Textured part uses legacy style")
+scene.rblx.use_2022_materials = True
+check(lay.get("rblx_style") == "2022" and mat.get("rblx_style") == "2022",
+      "Turning 2022 Materials back on updates textured and shared materials")
+check(M.surface_detail("Plastic", "2022") is None and M.surface_detail("Brick", "LEGACY")[1] <
+      M.surface_detail("Brick", "2022")[1], "Legacy patterns are chunkier than 2022 ones")
+
+# ---------------------------------------------------------------- build mode
+check(panels.RBLX_PT_build.bl_category == "Tool" and panels.RBLX_PT_build.bl_label == "Roblox Build",
+      "Roblox panels go in the Properties Editor's Tool tab by default")
+_loc = panels.location
+panels.location = lambda: "SIDEBAR"
+panels.reregister()
+check(panels.RBLX_PT_build.bl_category == "Roblox" and panels.RBLX_PT_build.bl_label == "Build"
+      and panels.RBLX_PT_build.is_registered, "Panels can move to the 3D View sidebar")
+panels.location = _loc
+panels.reregister()
+check(panels.RBLX_PT_properties.bl_category == "Tool" and panels.RBLX_PT_properties.is_registered,
+      "...and back to the Tool tab")
+
+model = bpy.data.objects.new("Car", None)
+model.rblx.kind, model.rblx.class_name = "MODEL", "Model"
+folder = bpy.data.objects.new("Stuff", None)
+folder.rblx.kind, folder.rblx.class_name = "MODEL", "Folder"
+for o in (model, folder):
+    scene.collection.objects.link(o)
+bpy.ops.object.select_all(action="DESELECT")
+bpy.ops.rblx.add_part(shape="BLOCK")
+wheel = bpy.context.active_object
+wheel.parent = model
+model.parent = folder
+check(build.pick_target(wheel) == model and build.pick_target(wheel, part_only=True) == wheel,
+      "Clicking a part selects its Model (not the Folder); Alt picks the part")
+check(build.moving_roots([model, wheel]) == [model], "Dragging a Model moves it, not its parts twice")
+check(abs(build.snap(3.4, 1.0) - 3.0) < 1e-9 and build.snap(3.4, 0.0) == 3.4, "Grid snapping")
+t = build.line_param(Vector((0, -10, 1)), Vector((0, 1, 0)), Vector((0, 0, 0)), Vector((0, 0, 1)))
+check(t is not None and abs(t - 1.0) < 1e-6, "Handle drag follows the closest point on its axis")
+check(not build.is_on() and "rblx.tool_move" not in str(build._state["registered"]),
+      "Build mode is off until turned on")
+build.set_build_mode(bpy.context, True)
+check(build.is_on() and len(build._state["registered"]) == 4, "Build mode on adds the 4 tools")
+build.set_build_mode(bpy.context, False)
+check(not build.is_on() and not build._state["registered"], "Build mode off removes them")
+keys = {(k[1]["type"], bool(k[1].get("ctrl")), bool(k[1].get("shift"))): k[0]
+        for k in build.RBLX_TL_select.bl_keymap}
+check(all(keys.get((k, False, False)) == "rblx.studio_camera" for k in "WASDQE") and
+      keys.get(("W", False, True)) == "rblx.studio_camera" and
+      keys.get(("RIGHTMOUSE", False, False)) == "rblx.studio_camera" and
+      keys.get(("D", True, False)) == "object.duplicate" and
+      keys.get(("G", True, False)) == "rblx.group_model" and
+      keys.get(("R", True, False)) == "rblx.rotate_selection",
+      "Roblox tools carry the Studio keys (WASD/QE, right-mouse look, Ctrl+D/G/R)")
+from rblx_tools import studio
+rv = type("RV", (), {})()
+rv.view_location, rv.view_distance = Vector((0, 0, 0)), 10.0
+rv.view_rotation = Vector((0, 0, 1)).to_track_quat("Z", "Y")
+eye0 = studio._eye(rv)
+studio.look(rv, 50, 20)
+check((studio._eye(rv) - eye0).length < 1e-4, "Right-mouse look turns the camera in place")
+bpy.ops.object.select_all(action="DESELECT")
+bpy.ops.rblx.add_part(shape="BLOCK")
+a = bpy.context.active_object
+bpy.ops.rblx.add_part(shape="BLOCK")
+b = bpy.context.active_object
+a.select_set(True)
+bpy.ops.rblx.group_model()
+grp = bpy.context.active_object
+check(grp.rblx.kind == "MODEL" and a.parent == grp and b.parent == grp, "Group as Model (Ctrl+G)")
+grp_name = grp.name
+bpy.ops.rblx.ungroup_model()
+check(a.parent is None and b.parent is None and bpy.data.objects.get(grp_name) is None,
+      "Ungroup (Ctrl+U)")
 
 # ---------------------------------------------------------------- downloads / web APIs (network)
 from rblx_tools.download import Downloader, DownloadError, clean_cookie
