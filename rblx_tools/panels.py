@@ -73,6 +73,8 @@ def draw_properties(layout, context, obj):
     elif r.kind == "LIGHT":
         layout.prop(obj, "name", text="Name")
         _draw_light(layout, obj)
+    elif r.kind == "EFFECT":
+        draw_effect(layout, context, obj)
     elif r.kind == "RIG":
         layout.prop(obj, "name", text="Name")
         layout.label(text="%d joints (bones)" % len(obj.data.bones), icon="BONE_DATA")
@@ -96,6 +98,10 @@ def _draw_part(layout, context, obj):
     sub = col.row()
     sub.enabled = r.material_mode != "SURFACE"
     sub.prop(r, "material")
+    sub = col.row()
+    sub.enabled = r.material_mode != "SURFACE"
+    sub.prop_search(r, "material_variant", context.scene, "rblx_variants", text="MaterialVariant",
+                    icon="MATERIAL")
     if r.material_mode == "SURFACE":
         row = col.row()
         row.label(text="Custom material / SurfaceAppearance", icon="MATERIAL")
@@ -182,6 +188,47 @@ class RBLX_PT_build(_RBLXPanel, bpy.types.Panel):
             sub = col.column()
             sub.active = p.studio_camera
             sub.prop(p, "camera_speed", text="Speed (studs/s)")
+
+
+ANIM_KEY_HELP = (
+    ("Space", "Play / pause"), ("1", "Go to start"), ("4 / 6", "Previous / next frame"),
+    ("J / K", "Previous / next keyframe"), ("R", "Rotate / move handles"),
+    ("Y", "World / local"), ("C", "Rotation snapping"), ("=", "Add keyframe"),
+    ("G", "Reset joint"), ("Delete", "Delete keyframe"), ("Ctrl+C / V", "Copy / paste pose"),
+    ("7", "Edit easing"), ("Alt+click", "Pick the part, not the joint"),
+)
+
+
+class RBLX_PT_animate(_RBLXPanel, bpy.types.Panel):
+    bl_label = "Animate"
+    bl_order = 10
+
+    def draw(self, context):
+        from . import animate
+        layout = self.layout
+        on = animate.is_on()
+        row = layout.row()
+        row.scale_y = 1.4
+        row.operator("rblx.toggle_anim_mode", text="Animation Mode: " + ("On" if on else "Off"),
+                     icon="ARMATURE_DATA", depress=on)
+        animate.draw_settings(layout, context)
+        row = layout.row(align=True)
+        row.operator("rblx.anim_key", icon="KEY_HLT")
+        row.operator("rblx.anim_delete_key", text="", icon="KEY_DEHLT")
+        row.operator("rblx.anim_reset", text="", icon="LOOP_BACK")
+        row.operator("rblx.anim_ease", text="", icon="IPO_BEZIER")
+        layout.prop(context.scene.render, "fps", text="Frame Rate")
+        row = layout.row(align=True)
+        row.operator("rblx.import_animation", text="Import", icon="IMPORT")
+        row.operator("rblx.export_animation", text="Export", icon="EXPORT")
+        box = layout.box()
+        box.label(text="Keys (Moon Animator / Eclipse)", icon="EVENT_K")
+        col = box.column(align=True)
+        col.scale_y = 0.8
+        for key, what in ANIM_KEY_HELP:
+            r = col.split(factor=0.35)
+            r.label(text=key)
+            r.label(text=what)
 
 
 class RBLX_PT_properties(_RBLXPanel, bpy.types.Panel):
@@ -325,7 +372,8 @@ class RBLX_PT_character(_RBLXPanel, bpy.types.Panel):
             if root.rblx.kind != "RIG" else root
         if rig is not None:
             layout.label(text="Rig: " + rig.name, icon="BONE_DATA")
-            layout.label(text="Select the rig and use Pose Mode to animate")
+            layout.label(text="Animate: turn on Animation Mode")
+            layout.operator("rblx.toggle_anim_mode", text="Animation Mode", icon="ARMATURE_DATA")
 
 
 class RBLX_PT_add(_RBLXPanel, bpy.types.Panel):
@@ -365,6 +413,7 @@ class RBLX_PT_lighting(_RBLXPanel, bpy.types.Panel):
         row.operator("rblx.apply_lighting", text="Apply", icon="FILE_REFRESH")
 
         col = _section(layout, "Sun & Time", "LIGHT_SUN")
+        col.prop(L, "technology")
         col.prop(L, "clock_time", slider=True)
         col.prop(L, "geographic_latitude")
         col.prop(L, "brightness")
@@ -394,6 +443,11 @@ class RBLX_PT_lighting_sky(_RBLXPanel, bpy.types.Panel):
         col.prop(L, "sky_mode", text="")
         if L.sky_mode == "IMAGE":
             col.prop(L, "sky_image")
+        elif L.sky_mode == "SKYBOX":
+            sub = col.column(align=True)
+            for face in ("bk", "dn", "ft", "lf", "rt", "up"):
+                sub.prop(L, "skybox_" + face)
+            col.prop(L, "skybox_orientation")
         col.prop(L, "sky_strength")
         col.prop(L, "celestial_bodies_shown")
         col.prop(L, "sun_angular_size")
@@ -405,8 +459,142 @@ class RBLX_PT_lighting_sky(_RBLXPanel, bpy.types.Panel):
 
         col = _section(layout, "Atmosphere", "MOD_OCEAN")
         col.prop(L, "atmosphere_density", slider=True)
+        col.prop(L, "atmosphere_offset", slider=True)
         col.prop(L, "atmosphere_color")
+        col.prop(L, "atmosphere_decay")
+        col.prop(L, "atmosphere_glare")
         col.prop(L, "atmosphere_haze")
+
+
+class RBLX_PT_material_service(_RBLXPanel, bpy.types.Panel):
+    bl_label = "Material Service"
+    bl_order = 15
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        from . import materialservice
+        materialservice.draw_material_service(self.layout, context)
+
+
+# ---------------------------------------------------------------------------
+# Effects
+
+_EMITTER_FIELDS = (
+    ("Enabled", "Enabled"), ("Rate", "Rate"), ("Lifetime Min", "Lifetime (min)"),
+    ("Lifetime Max", "Lifetime (max)"), ("Speed Min", "Speed (min)"), ("Speed Max", "Speed (max)"),
+    ("Spread X", "SpreadAngle X"), ("Spread Y", "SpreadAngle Y"), ("Acceleration", "Acceleration"),
+    ("Drag", "Drag"), ("Rotation Min", "Rotation (min)"), ("Rotation Max", "Rotation (max)"),
+    ("RotSpeed Min", "RotSpeed (min)"), ("RotSpeed Max", "RotSpeed (max)"),
+    ("Size", "Size (largest)"), ("Emitter Size", "Emit Area"),
+    ("Shape", "Shape (0 Box, 1 Sphere, 2 Cylinder, 3 Disc)"), ("Surface", "Surface Only"),
+    ("In Out", "In/Out (0 Out, 1 In, 2 Both)"), ("Burst Count", "Burst Count"),
+    ("Burst Frame", "Burst Frame"),
+)
+
+
+def draw_effect(layout, context, obj):
+    from . import effects
+    r = obj.rblx
+    layout.prop(obj, "name", text="Name")
+    if r.class_name in ("Beam", "Trail"):
+        mat = effects.effect_material(obj)
+        nodes = mat.node_tree.nodes if mat else {}
+        ramp, tcurve, em = nodes.get("RBX Color"), nodes.get("RBX Transparency"), nodes.get("RBX Emission")
+        mod = effects.effect_modifier(obj)
+        if mod is not None:
+            col = layout.column(align=True)
+            for name, ident in effects._input_ids(mod).items():
+                if name not in ("Geometry", "Camera"):
+                    effects.draw_input(col, mod, ident, name)
+    else:
+        mod, _ng, size_node, mat, ramp, tcurve = effects.emitter_parts(obj)
+        em = mat.node_tree.nodes.get("RBX Emission") if mat else None
+        if mod is None:
+            layout.label(text="Particle setup missing", icon="ERROR")
+            return
+        ids = effects._input_ids(mod)
+        col = layout.column(align=True)
+        for key, label in _EMITTER_FIELDS:
+            if key in ids:
+                effects.draw_input(col, mod, ids[key], label)
+        if size_node is not None:
+            layout.label(text="Size over lifetime")
+            layout.template_curve_mapping(size_node, "mapping")
+    if ramp is not None:
+        layout.label(text="Color")
+        layout.template_color_ramp(ramp, "color_ramp", expand=True)
+    if tcurve is not None:
+        layout.label(text="Transparency")
+        layout.template_curve_mapping(tcurve, "mapping")
+    if em is not None:
+        layout.prop(em.inputs["Strength"], "default_value", text="Glow (LightEmission)")
+    row = layout.row()
+    row.label(text=r.texture_id or "No texture", icon="TEXTURE")
+    row.operator("rblx.effect_texture", text="", icon="FILEBROWSER")
+
+
+class RBLX_PT_effects(_RBLXPanel, bpy.types.Panel):
+    bl_label = "Effects"
+    bl_order = 16
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
+        fx = context.scene.rblx_effects
+        col = _section(layout, "Post-Processing", "SHADERFX")
+        for flag, props_ in (
+                ("bloom_enabled", ("bloom_intensity", "bloom_size", "bloom_threshold")),
+                ("sunrays_enabled", ("sunrays_intensity", "sunrays_spread")),
+                ("cc_enabled", ("cc_brightness", "cc_contrast", "cc_saturation", "cc_tint")),
+                ("blur_enabled", ("blur_size",)),
+                ("dof_enabled", ("dof_focus_distance", "dof_in_focus_radius",
+                                 "dof_far_intensity", "dof_near_intensity"))):
+            col.prop(fx, flag)
+            if getattr(fx, flag):
+                sub = col.column(align=True)
+                for p in props_:
+                    sub.prop(fx, p)
+        row = col.row(align=True)
+        row.prop(fx, "viewport_preview", icon="HIDE_OFF")
+        row.operator("rblx.apply_post_effects", text="", icon="FILE_REFRESH")
+        if fx.dof_enabled and context.scene.camera is None:
+            col.label(text="Depth of Field needs a scene camera", icon="ERROR")
+
+        col = _section(layout, "Particles", "PARTICLES")
+        grid = col.grid_flow(columns=2, even_columns=True, align=True)
+        for ident, label, _d, icon, _n in [
+                ("PARTICLES", "Particles", "", "PARTICLES", 0), ("FIRE", "Fire", "", "LIGHT_SUN", 1),
+                ("SMOKE", "Smoke", "", "OUTLINER_DATA_VOLUME", 2),
+                ("SPARKLES", "Sparkles", "", "SHADERFX", 3)]:
+            grid.operator("rblx.add_effect", text=label, icon=icon).kind = ident
+        row = col.row(align=True)
+        row.operator("rblx.add_trail", text="Trail", icon="CURVE_PATH")
+        row.operator("rblx.add_beam", text="Beam", icon="LIGHT_SUN")
+        row.operator("rblx.add_explosion", text="Explosion", icon="FORCE_FORCE")
+        row = col.row(align=True)
+        row.operator("rblx.bake_particles", icon="REC")
+        row.operator("rblx.bake_particles", text="", icon="TRASH").free = True
+        sub = col.column()
+        sub.scale_y = 0.8
+        sub.label(text="Play from the first frame, or Bake,", icon="INFO")
+        sub.label(text="to see particles on any frame.")
+
+        obj = context.active_object
+        if obj is not None and obj.rblx.kind == "EFFECT":
+            draw_effect(_section(layout, obj.rblx.class_name, "SHADERFX"), context, obj)
+        elif obj is not None and obj.type in ("MESH", "EMPTY") and obj.rblx.kind in ("PART", "MODEL"):
+            col = _section(layout, "Highlight", "OUTLINER_OB_LIGHT")
+            if obj.rblx.kind == "PART":
+                r = obj.rblx
+                col.prop(r, "highlight_enabled")
+                if r.highlight_enabled:
+                    col.prop(r, "highlight_fill")
+                    col.prop(r, "highlight_fill_transparency", slider=True)
+                    col.prop(r, "highlight_outline")
+                    col.prop(r, "highlight_outline_transparency", slider=True)
+            row = col.row(align=True)
+            row.operator("rblx.add_highlight", text="Add to Selection", icon="ADD")
+            row.operator("rblx.add_highlight", text="Remove", icon="REMOVE").remove = True
 
 
 # ---------------------------------------------------------------------------
@@ -418,7 +606,9 @@ class RBLX_PT_import(_RBLXPanel, bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        layout.operator("import_scene.rblx", text="Import Roblox File", icon="IMPORT")
+        row = layout.row(align=True)
+        row.operator("import_scene.rblx", text="Import Roblox File", icon="IMPORT")
+        row.operator("rblx.export_model", text="Export", icon="EXPORT")
         layout.prop(context.scene.rblx, "stud_scale")
         layout.prop(context.scene.rblx, "use_2022_materials")
 
@@ -443,6 +633,7 @@ class RBLX_PT_import(_RBLXPanel, bpy.types.Panel):
 CLASSES = (
     RBLX_UL_layers,
     RBLX_PT_build,
+    RBLX_PT_animate,
     RBLX_PT_properties,
     RBLX_PT_object_properties,
     RBLX_PT_textures,
@@ -450,6 +641,8 @@ CLASSES = (
     RBLX_PT_add,
     RBLX_PT_lighting,
     RBLX_PT_lighting_sky,
+    RBLX_PT_material_service,
+    RBLX_PT_effects,
     RBLX_PT_import,
 )
 

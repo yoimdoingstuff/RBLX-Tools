@@ -249,6 +249,7 @@ def build_rig(imp, model_inst, model_obj):
         obj = objs.get(key)
         if obj is not None:
             _bone_parent(imp, obj, arm, bn)
+            obj["rblx_body_part"] = True
             rigged[key] = bn
 
     # Welded extras (accessories, attached parts) follow the part they're welded to
@@ -409,7 +410,99 @@ def setup(imp, model_inst, model_obj):
     apply_body_colors(imp, model_inst)
     apply_clothing(imp, model_inst)
     model_obj["rblx_character"] = True
-    return build_rig(imp, model_inst, model_obj)
+    arm = build_rig(imp, model_inst, model_obj)
+    if arm is not None:
+        layered = [d for d in model_inst.descendants() if d.class_name == "WrapLayer"]
+        targets = []
+        if layered:
+            bpy.context.view_layer.update()
+            for t in model_inst.descendants():
+                if t.class_name == "WrapTarget" and t.parent is not None \
+                        and id(t.parent) in imp.objects:
+                    targets.append((t.parent, t, imp.objects[id(t.parent)].matrix_world.copy()))
+        # inner layers first (WrapLayer.Order), like Roblox
+        layered.sort(key=lambda w: int(w.get("Order", default=1) or 1))
+        for wrap in layered:
+            handle = wrap.parent
+            obj = imp.objects.get(id(handle)) if handle is not None else None
+            if obj is not None and obj.type == "MESH":
+                if targets:
+                    from . import cagefit
+                    try:
+                        if cagefit.fit_layer(obj, wrap, handle, targets, imp.load_mesh, imp.scale):
+                            imp.report.count("layered clothing fitted to cages")
+                    except Exception as ex:
+                        imp.report.warnings.append("%s: cage fitting skipped (%s)" % (obj.name, ex))
+                try:
+                    if skin_to_body(obj, arm):
+                        imp.report.count("layered clothing")
+                except Exception as ex:
+                    imp.report.warnings.append("%s: layered clothing not skinned (%s)" % (obj.name, ex))
+    return arm
+
+
+def skin_to_body(obj, arm, max_influences=2):
+    """Make a layered clothing mesh bend with the body: weight each vertex to
+    the nearest body parts' bones and deform it with an Armature modifier.
+    (Roblox fits layered clothing with cages; this keeps its imported shape.)"""
+    import numpy as np
+    bpy.context.view_layer.update()  # world matrices of freshly imported, bone-parented parts
+    body = [o for o in arm.children if o.parent_type == "BONE" and o.get("rblx_body_part")
+            and o.type == "MESH"]
+    if not body:
+        return False
+    me = obj.data
+    if me.users > 1:
+        obj.data = me = me.copy()
+    n = len(me.vertices)
+    if n == 0:
+        return False
+    co = np.empty(n * 3, dtype=np.float64)
+    me.vertices.foreach_get("co", co)
+    co = co.reshape(n, 3)
+    mw = np.array(obj.matrix_world)
+    world = co @ mw[:3, :3].T + mw[:3, 3]
+    dists = []
+    for part in body:
+        inv = np.array(part.matrix_world.inverted_safe())
+        local = world @ inv[:3, :3].T + inv[:3, 3]
+        bb = np.array([list(c) for c in part.bound_box])
+        lo, hi = bb.min(axis=0), bb.max(axis=0)
+        outside = np.maximum(np.maximum(lo - local, local - hi), 0.0)
+        # back to world-ish units (undo the part's scale)
+        scale = np.array(part.matrix_world.to_scale())
+        dists.append(np.linalg.norm(outside * scale, axis=1))
+    D = np.stack(dists, axis=1)                       # (verts, parts)
+    order = np.argsort(D, axis=1)[:, :max_influences]
+    near = np.take_along_axis(D, order, axis=1)
+    w = 1.0 / (near + 0.05) ** 2
+    # a vertex well inside one part's reach shouldn't blend with a far one
+    w[near > (near[:, :1] + 0.6)] = 0.0
+    w /= w.sum(axis=1, keepdims=True)
+    for vg in list(obj.vertex_groups):
+        obj.vertex_groups.remove(vg)
+    groups = {}
+    for p_idx, part in enumerate(body):
+        mask = (order == p_idx)
+        verts = np.nonzero(mask.any(axis=1))[0]
+        if not len(verts):
+            continue
+        vg = groups.get(part.parent_bone) or obj.vertex_groups.new(name=part.parent_bone)
+        groups[part.parent_bone] = vg
+        vw = (w * mask).sum(axis=1)
+        for v in verts:
+            if vw[v] > 0.0:
+                vg.add([int(v)], float(vw[v]), "ADD")
+    # parent to the armature object and let the modifier do the bending
+    mw_copy = obj.matrix_world.copy()
+    obj.parent = arm
+    obj.parent_type = "OBJECT"
+    obj.matrix_world = mw_copy
+    mod = obj.modifiers.get("RBX Body") or obj.modifiers.new("RBX Body", "ARMATURE")
+    mod.object = arm
+    mod.use_vertex_groups = True
+    obj["rblx_layered_clothing"] = True
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -568,12 +661,19 @@ def attach_accessory(model, accessory, adjust=None):
             if batt is not None and batt.class_name == "Attachment":
                 target = (p, batt)
                 break
+    point = accessory.props.get("AttachmentPoint")
+    hatt_cf = None
     if target is None:
         head = next((p for p in parts if p.name == "Head"), None)
         if head is None:
             return False
         target = (head, None)
-        world = head.props.get("CFrame", CFrame()) * CFrame((0.0, 0.6, 0.0))
+        if isinstance(point, CFrame) and hatt is None:
+            # classic Hat: weld C0 = (0, 0.5, 0) on the head, C1 = AttachmentPoint
+            world = head.props.get("CFrame", CFrame()) * CFrame((0.0, 0.5, 0.0))
+            hatt_cf = point
+        else:
+            world = head.props.get("CFrame", CFrame()) * CFrame((0.0, 0.6, 0.0))
     else:
         world = _attachment_world(*target)
     if adjust is not None:
@@ -581,11 +681,39 @@ def attach_accessory(model, accessory, adjust=None):
         accessory.props["RBXAdjusted"] = True
     if hatt is not None:
         handle.props["CFrame"] = world * hatt.props.get("CFrame", CFrame()).inverse()
+    elif hatt_cf is not None:
+        handle.props["CFrame"] = world * hatt_cf.inverse()
     else:
         handle.props["CFrame"] = world
-    model.add_child(accessory)
+    if accessory.parent is not model:
+        model.add_child(accessory)
     _new("Weld", "AccessoryWeld", handle, Part0=handle, Part1=target[0])
     return True
+
+
+ACCESSORY_CLASSES = ("Accessory", "Hat", "Accoutrement")
+
+
+def weld_loose_accessories(model):
+    """Roblox welds an Accessory (or classic Hat) to the body when it is
+    parented to a character, matching its Handle's attachment to the body
+    part's. Characters saved in places can hold accessories that were never
+    welded: do the same, so they follow the rig. Returns how many."""
+    welded = set()
+    for d in model.descendants():
+        if d.class_name in WELD_CLASSES:
+            for k in ("Part0", "Part1"):
+                p = d.props.get(k)
+                if isinstance(p, Instance):
+                    welded.add(id(p))
+    n = 0
+    for acc in [c for c in model.children if c.class_name in ACCESSORY_CLASSES]:
+        handle = acc.find_first_child("Handle")
+        if handle is None or id(handle) in welded:
+            continue
+        if attach_accessory(model, acc):
+            n += 1
+    return n
 
 
 def _download_model(resolver, asset_id, report):

@@ -736,8 +736,8 @@ def _keymap(tool_id):
          {"properties": [("part_only", True), ("extend", True)]}),
         ("rblx.toggle_handle_space", {"type": "L", "value": "PRESS", "ctrl": True}, None),
     ]
-    for key, ident in zip(("ONE", "TWO", "THREE", "FOUR"), TOOL_IDS):  # Studio: Ctrl+1..4
-        km.append(("wm.tool_set_by_id", {"type": key, "value": "PRESS", "ctrl": True},
+    for key, ident in zip(("ONE", "TWO", "THREE", "FOUR"), TOOL_IDS):  # 1-4 pick the tools
+        km.append(("wm.tool_set_by_id", {"type": key, "value": "PRESS"},
                    {"properties": [("name", ident)]}))
     return tuple(km + STUDIO_KEYS)
 
@@ -790,7 +790,7 @@ class RBLX_TL_select(_RobloxTool, bpy.types.WorkSpaceTool):
     bl_idname = TOOL_SELECT
     bl_label = "Roblox Select"
     bl_description = ("Click parts to select them, drag to move them over other surfaces "
-                      "with grid snapping (Ctrl+1)")
+                      "with grid snapping (1)")
     bl_icon = "ops.generic.select"
     bl_widget = None
     bl_keymap = _keymap(TOOL_SELECT)
@@ -799,7 +799,7 @@ class RBLX_TL_select(_RobloxTool, bpy.types.WorkSpaceTool):
 class RBLX_TL_move(_RobloxTool, bpy.types.WorkSpaceTool):
     bl_idname = TOOL_MOVE
     bl_label = "Roblox Move"
-    bl_description = "Studio-style Move handles (Ctrl+2)"
+    bl_description = "Studio-style Move handles (2)"
     bl_icon = "ops.transform.translate"
     bl_widget = None
     bl_keymap = _keymap(TOOL_MOVE)
@@ -808,7 +808,7 @@ class RBLX_TL_move(_RobloxTool, bpy.types.WorkSpaceTool):
 class RBLX_TL_scale(_RobloxTool, bpy.types.WorkSpaceTool):
     bl_idname = TOOL_SCALE
     bl_label = "Roblox Scale"
-    bl_description = "Studio-style Scale handles: resize one side of a part, Ctrl for both (Ctrl+3)"
+    bl_description = "Studio-style Scale handles: resize one side of a part, Ctrl for both (3)"
     bl_icon = "ops.transform.resize"
     bl_widget = None
     bl_keymap = _keymap(TOOL_SCALE)
@@ -817,7 +817,7 @@ class RBLX_TL_scale(_RobloxTool, bpy.types.WorkSpaceTool):
 class RBLX_TL_rotate(_RobloxTool, bpy.types.WorkSpaceTool):
     bl_idname = TOOL_ROTATE
     bl_label = "Roblox Rotate"
-    bl_description = "Studio-style Rotate handles (Ctrl+4)"
+    bl_description = "Studio-style Rotate handles (4)"
     bl_icon = "ops.transform.rotate"
     bl_widget = None
     bl_keymap = _keymap(TOOL_ROTATE)
@@ -882,6 +882,9 @@ def set_build_mode(context, on):
                 bpy.ops.object.mode_set(mode="OBJECT")
             except RuntimeError:
                 pass
+        from . import animate
+        if animate.is_on():
+            animate.set_anim_mode(context, False)
         _register_tools()
         _state["on"] = True
         _set_tool(context, TOOL_SELECT)
@@ -949,6 +952,11 @@ class RBLX_OT_stud_grid(bpy.types.Operator):
 
 def draw_header_button(self, context):
     if context.mode not in ("OBJECT", "POSE", "EDIT_MESH"):
+        return
+    from . import animate
+    # The Animation workspace gets the Animate button instead of Build
+    if animate.is_on() or (animate.is_anim_workspace(context) and not _state["on"]):
+        animate.draw_toggle(self.layout)
         return
     self.layout.operator(RBLX_OT_toggle_build_mode.bl_idname, text="Build",
                          icon="MOD_BUILD", depress=_state["on"])

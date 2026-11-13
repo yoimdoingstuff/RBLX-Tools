@@ -30,6 +30,14 @@ Tested on Blender 5.2. Needs Blender 4.2 or newer.
     built from its Motor6D joints, and each body part follows its bone, so you
     animate in Pose Mode.
   - BodyColors, Shirts, Pants, T-Shirts, faces and accessories are applied.
+  - Characters inside places (NPCs) work the same way. Accessories and classic
+    Hats that were saved without a weld are attached the way Roblox does when
+    the game runs, so they follow the head. Files saved by recent Studio
+    versions (which rename properties like `ShirtTemplate` to
+    `ShirtTemplateContent`) are read too.
+  - Clothing and face images uploaded by players need a login to download (an
+    API key or cookie, see below); without one those characters show skin
+    colour only.
   - **Add > Roblox > R6 / R15 Character** inserts a ready-to-animate rig. R6
     works offline; R15 uses the rig from your Roblox Studio install.
   - **Avatar from Username**: imports anyone's avatar as a rigged R6 or R15
@@ -93,7 +101,7 @@ Tested on Blender 5.2. Needs Blender 4.2 or newer.
       **scroll** zooms toward the cursor.
     - **F** focuses the selection.
   - **Studio shortcuts**:
-    - Ctrl+1–4 tools, Ctrl+L World/Local.
+    - 1–4 pick the tools (Select, Move, Scale, Rotate), Ctrl+L World/Local.
     - Ctrl+D duplicate in place, Ctrl+G group as Model, Ctrl+U ungroup.
     - Ctrl+R rotate 90°, Ctrl+T tilt 90°.
     - Delete / Backspace delete, Ctrl+Z / Ctrl+Y undo / redo.
@@ -101,6 +109,151 @@ Tested on Blender 5.2. Needs Blender 4.2 or newer.
     or turn Build Mode off, to get Blender's own keys back. For example, A
     selects all and Shift+A opens the Add menu again.
   - Locked parts can't be clicked.
+- **Effects** (Roblox Effects panel; also imported from place and model files):
+  - **Post-processing**:
+    - BloomEffect, SunRaysEffect, ColorCorrectionEffect (Brightness,
+      Contrast, Saturation, TintColor) and BlurEffect run in Blender's
+      compositor.
+    - DepthOfFieldEffect sets the scene camera's depth of field.
+    - They're read from Lighting and from the Workspace camera; disabled ones
+      are skipped.
+    - **Show in Viewport** previews them in Material Preview / Rendered
+      shading.
+    - If your scene already has its own compositor nodes, they're left alone.
+  - **ParticleEmitter, Fire, Smoke and Sparkles**:
+    - A Geometry Nodes particle simulation that works like Roblox's: Rate,
+      Lifetime, Speed, SpreadAngle, Acceleration, Drag, Rotation, RotSpeed,
+      EmissionDirection and LightEmission.
+    - Size, Color and Transparency change over each particle's life, and you
+      can edit them as curves and a color ramp in the panel.
+    - Particles are camera-facing sprites using Roblox's own particle textures
+      (taken from your Studio install).
+    - Emitters inside an Attachment emit from the attachment.
+    - Particles build up as the animation plays from the first frame. Use
+      **Bake Particles** to render or scrub any frame.
+  - **Beam**: a textured, curved ribbon between its two attachments, with
+    Width0/1, CurveSize0/1, Color, Transparency, Texture and FaceCamera.
+  - **Highlight**: the FillColor tint plus an outline, on a part or on every
+    part of a model. "Always on top" isn't reproduced.
+- **More effects**:
+  - **Trail**: a fading ribbon left behind between two attachments as a part
+    moves.
+  - **Live Beams** follow their attachments when parts move or are animated.
+  - **Explosion**: a burst of fire and smoke on one frame. Add it from the
+    Effects panel at a part or the 3D cursor; Explosions in files are imported
+    too.
+  - **ParticleEmitter shapes**: Box, Sphere, Cylinder and Disc, emitting from
+    the volume or only the surface, outward, inward or both.
+  - **ParticleEmitter flipbooks**: 2x2, 4x4 and 8x8 sheets, playing in Loop,
+    OneShot, PingPong or Random mode.
+- **Unions (CSG)**:
+  - UnionOperation, NegateOperation and IntersectOperation are rebuilt from the
+    parts they were made from, using Blender's boolean tools.
+  - That includes nested unions and modern unions whose parts live in an asset
+    (downloaded like other assets).
+  - Each part keeps its own color unless UsePartColor is on.
+- **Terrain**:
+  - Smooth terrain is rebuilt as a rounded surface with the place's terrain
+    material colors and Roblox's terrain textures (top and side textures,
+    each at Roblox's own tile size).
+  - **Water** uses Roblox's 25 animated wave normal maps, speed and strength
+    from WaterWaveSpeed / WaterWaveSize, with WaterColor, WaterTransparency
+    and WaterReflectance. Like in Roblox, fully transparent water still shows
+    its surface (tint, waves and reflections).
+  - **Decoration** (grass): blades GrassLength tall grow on upward Grass
+    terrain near the active camera, swaying, like Roblox only draws grass near
+    the player. Density and distance are inputs of the "RBX Grass" modifier.
+  - **Clouds** under Terrain become a cloud layer with Cover, Density and Color.
+  - Tested on Roblox's template places (Village, Castle, Pirate Island,
+    Suburban, Starting Place).
+- **A place's look comes with it**: importing a place, or **Load Lighting From
+  Place** (Lighting panel), brings over:
+  - Lighting: ClockTime, Brightness, Ambient colors, Exposure and fog.
+  - Technology: Future turns on Eevee ray tracing.
+  - Atmosphere: Density, Offset, Color, Decay, Glare and Haze.
+  - The Sky's skybox: the six images, downloaded like other assets.
+  - Post effects in Lighting and on the camera.
+  - MaterialService.
+  
+  All of these can be edited afterwards in the Lighting and Effects panels
+  and change the render live.
+- **Material Service panel**:
+  - Use2022Materials.
+  - **MaterialVariants**: custom looks for a Roblox material made of ColorMap,
+    NormalMap, RoughnessMap and MetalnessMap images (asset ids or files),
+    with StudsPerTile.
+  - **Applying a variant**: set it on a part through its **MaterialVariant**
+    property (in Properties > Appearance) or with "Use on Selected Parts".
+  - **Override Material**: tick it to make every part of that base material
+    use the variant (MaterialService.<Material>Name).
+  - Variants and overrides from a place are imported.
+- **Layered clothing fits the body**:
+  - When the clothing's ReferenceMesh cage and the body's WrapTarget cages
+    can be loaded, the clothing is moved by the difference between them
+    (cages matched by UV, like Roblox), inner layers first.
+  - Then it's weighted to the nearest body parts' bones, so it bends when you
+    animate.
+- **Animations in and out**:
+  - **Import Animation** (Animate panel, or File > Import > Roblox Animation)
+    reads KeyframeSequences from .rbxm/.rbxmx files. That's what Roblox's
+    Animation Editor, Moon Animator 2 (File > Export) and Eclipse Animator
+    save.
+  - CurveAnimations (the Animation Editor's curve mode) are read too:
+    position, Euler and quaternion rotation curves with their cubic tangents,
+    baked to one key per frame so the motion matches. Their markers become
+    timeline markers.
+  - You can also give an animation asset id; your own animations need an API
+    key or cookie.
+  - Poses, easing styles and keyframe markers come across.
+  - **Export Animation** saves the rig's animation as a KeyframeSequence
+    (.rbxmx) with Loop and Priority settings. Insert it in Studio and load it
+    in the Animation Editor or Moon to publish it.
+- **Export Roblox Model** (Import & Assets panel, or File > Export > Roblox
+  Model):
+  - Saves the selected objects as a .rbxmx that Studio can insert.
+  - Includes parts with their shape, size, CFrame, color, material and
+    behavior; Models and Folders; MeshParts with their MeshId; Decals and
+    Textures with asset ids; lights; particle emitters.
+  - Characters get their Motor6D joints and a Humanoid, plus their animation.
+- **Animation Mode**: animate Roblox rigs and parts the way Moon Animator 2
+  and Eclipse Animator do.
+  - **Turning it on**: in Blender's **Animation** workspace, the 3D View
+    header shows an **Animate** button where Build is in other workspaces. The
+    Dope Sheet header and the Roblox Animate panel have it too. Turning it on
+    switches Build Mode off, and the reverse.
+  - **Posing**:
+    - Click a body part to pick its **joint**, like Moon. Alt+click picks the
+      part or model itself; Shift+click adds to the selection.
+    - **Rotation rings** turn the joint around its pivot. **R** switches to
+      move arrows, **Y** switches world/local axes, and **C** toggles rotation
+      snapping (15° by default).
+  - **Keyframes**:
+    - Every handle drag sets a keyframe at the current frame when you let go,
+      using the chosen **easing**.
+    - The easing styles are Roblox's: Linear, Constant, Sine, Back, Quad,
+      Cubic, Quart, Quint, Expo, Circ, Bounce and Elastic, each with In, Out or
+      InOut. "Smooth" is Blender's own curve.
+    - A keyframe's easing shapes the motion from that keyframe to the next,
+      like Roblox's keyframes.
+  - **Keys** (Moon Animator's defaults, which Eclipse's default keys also use):
+    - Space play / pause, 1 go to start, 4 / 6 previous / next frame, J / K
+      previous / next keyframe.
+    - = add a keyframe, G reset the joint, Delete or X delete the keyframe.
+    - Ctrl+C / Ctrl+V copy / paste a pose.
+    - 7 edit the easing of the keyframes at the current frame.
+    - F focus, Ctrl+Z / Ctrl+Y undo / redo.
+    - The Studio camera (WASD, right mouse look, scroll) works too.
+  - **Toolbar**: the row at the top of the 3D View has play controls, Key /
+    Delete / Reset, easing style and direction, the handle mode, world/local
+    axes and rotation snapping.
+  - **Timeline**: Blender's Dope Sheet / Timeline. While Animation Mode is on,
+    it shows every animated rig's tracks, like Moon's timeline.
+  - **Frame rate**: scenes without animation switch to 60 fps, like Moon and
+    Eclipse.
+  - **Import / Export** buttons load Roblox animations onto the rig and save
+    it back as a KeyframeSequence (see "Animations in and out").
+  - **Not included yet**: Moon's mirror tools (Ctrl+R reflect, paste
+    flipped), onion skins and IK.
 - **Studio-style properties** (Roblox Properties panel, and Properties Editor >
   Object > Roblox):
   - Grouped like Studio: Appearance (BrickColor, CastShadow, Color, Material,
@@ -136,18 +289,33 @@ Tested on Blender 5.2. Needs Blender 4.2 or newer.
     ColorShift, ShadowSoftness, ExposureCompensation, Fog and Atmosphere work
     like their Studio counterparts.
   - Presets, or load the lighting from any place file.
-- **Roblox materials**: one shared material per Roblox material type, with
-  procedural surface detail (wood grain, bricks, cobblestones, ...).
+- **Roblox materials**: one shared material per Roblox material type.
+  - **Roblox's own textures**: in the Material Service panel, **Download
+    Roblox Material Textures** fetches them once (about 57 MB):
+    - What you get: color, normal, roughness and metalness maps for parts,
+      Roblox's terrain textures (2022 and legacy) and the water waves.
+    - Where they come from: Roblox's own setup CDN (`setup.rbxcdn.com`). They
+      are taken from the last Studio builds that still shipped them as files;
+      newer Studio streams them.
+    - They're converted to PNGs in the asset library (`roblox_materials/`).
+    - No login is needed.
+  - Roblox's color maps are detail textures, tinted by the part or terrain
+    color like in Roblox.
+  - Until the textures are downloaded (or with **Use Roblox's Textures**
+    off), procedural stand-ins are used (wood grain, bricks, cobblestones, ...).
   - **2022 Materials**: matches Roblox's `MaterialService.Use2022Materials`.
-    - On (the default) gives the finer, subtler 2022 material look.
-    - Off gives the older, chunkier pre-2022 look.
+    - On (the default): Roblox's 2022 textures.
+    - Off: the pre-2022 part and terrain textures.
+    - Roblox never shipped 2022 textures as files for part-only materials
+      (Wood, Metal, Plastic, ...), so those use the pre-2022 set in both
+      styles.
     - Imported places use the place's own setting.
-    - The toggle is in the Properties panel (Appearance) and in Import & Assets.
-  - These are procedural stand-ins, not Roblox's actual texture images: Studio
-    downloads those on demand instead of keeping them on disk.
-  - For the real look, point **Material Textures** at a folder of tileable
-    textures named `Wood.png`, `Wood_normal.png`, `Wood_roughness.png`, ...
-    Put them in `2022/` and `Legacy/` subfolders to have a set for each style.
+    - The toggle is in the Properties panel (Appearance), the Material Service
+      panel and Import & Assets.
+  - Your own textures win over Roblox's: point **Material Textures** at a
+    folder of tileable textures named `Wood.png`, `Wood_normal.png`,
+    `Wood_roughness.png`, ... Put them in `2022/` and `Legacy/` subfolders to
+    have a set for each style.
 
 ## Install
 
@@ -241,28 +409,56 @@ worked):
 
 ## Known limitations
 
-- Unions (CSG) import as boxes. Their geometry is stored in a format that isn't
-  decoded yet.
-- Layered clothing (3D shirts/jackets) and dynamic heads import as rigid meshes
-  attached to the body. They don't deform with it.
-- R15 avatar body scales (height, width, head) are applied approximately.
+- **Unions** are rebuilt from the parts they were made of, using Blender's
+  boolean tools:
+  - The union's own Material is used for the whole union.
+  - Unions whose asset needs a login are boxes until you add an API key or
+    cookie.
+- **Layered clothing**:
+  - Cage fitting needs the clothing's and the body's cage meshes. Cages of
+    UGC items usually need an API key or cookie to download. Without them,
+    the clothing keeps its imported shape.
+  - Roblox's own solver isn't published. The fitting moves the clothing with
+    its cages, without Roblox's extra smoothing and layer-collision passes.
+- **Terrain**:
+  - Roblox's real textures are used, but a few looks are estimated by eye
+    because Roblox doesn't document them:
+    - the grass blade shape and density;
+    - how big the water wave texture is and how fast its frames play;
+    - the shape and height of the cloud layer.
+  - Terrain doesn't use MaterialVariants.
+  - Grass grows around the scene's active camera. Without a camera, it grows
+    around the world origin.
+- **Particles, Fire, Smoke and Sparkles** use Roblox's particle textures, but
+  Roblox doesn't publish how Fire/Smoke/Sparkles emit, so their motion is
+  matched by eye.
+- **Skybox images** made by a place's creator (not by Roblox) need an API key
+  or cookie to download. Until then the Roblox-style gradient sky is used.
+- **Animations**:
+  - Roblox only has some easings (Linear, Constant, Cubic, Elastic, Bounce).
+    Other easings, including Blender's Bezier curves, are exported as a
+    keyframe on every frame so the motion matches.
+  - Animations are exported as KeyframeSequences, not CurveAnimations.
+- **Model export** writes Roblox objects. Meshes made in Blender can't travel in
+  a model file: they're written as blocks and listed in the export report.
+  Bring them into Studio with its 3D Importer (.fbx/.obj).
+- **R15 avatar body scales** (height, width, head) are applied approximately.
   Body type and proportion blending isn't.
-- Terrain isn't imported.
-- The lighting is an approximation of Roblox's renderer in Blender, not an
+- **Lighting** is an approximation of Roblox's renderer in Blender, not an
   exact match.
+- **Effects**:
+  - Trails and particles build up while the animation plays; Bake them to
+    render any frame.
+  - Trail WidthScale and FaceCamera aren't reproduced.
+  - Highlight's "always on top" isn't reproduced.
+- **Moon Animator's own save files** aren't read: Moon's code asks not to be
+  used by AI tools, so its save format wasn't studied. Export your Moon
+  animation to a KeyframeSequence (Moon: File > Export) and import that.
 
 ## Roadmap
 
-- **Moon Animator 2 / Eclipse Animator animations**
-  - Option 1: import animations exported from Studio. You build the animation
-    with the plugin, save the animated rig or model, and the addon turns its
-    KeyframeSequences into keyframes on the rig's bones. Rigs already store
-    each joint's C0/C1 for this.
-  - Option 2: recreate the plugins' motion in Blender, by reading how each
-    plugin generates its animation and rebuilding it as Blender keyframes.
-- Union/CSG geometry, layered clothing deformation, and Terrain.
-- Exporting back to Roblox.
-- Bloom, ColorCorrection, SunRays and DepthOfField post effects.
+- MaterialVariants on terrain.
+- CurveAnimation export.
 
 ## Development
 

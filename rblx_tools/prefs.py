@@ -112,6 +112,12 @@ class RBLX_AddonPreferences(bpy.types.AddonPreferences):
     material_tile_studs: FloatProperty(
         name="Material Tile Size", default=4.0, min=0.1, soft_max=64.0,
         description="How many studs one tile of a material texture covers")
+    use_roblox_textures: BoolProperty(
+        name="Use Roblox's Material Textures", default=True,
+        update=lambda self, ctx: __import__(__package__ + ".materials", fromlist=["x"]).rebuild_all(
+            ctx.scene),
+        description="Use Roblox's own material and terrain textures (once downloaded) instead of "
+                    "the add-on's procedural stand-ins")
     use_studio_content: BoolProperty(
         name="Use Roblox Studio Content", default=True,
         description="Use built-in files (rbxasset://, character rigs, head mesh) from your Roblox "

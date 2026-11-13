@@ -6,7 +6,7 @@ import os
 import bpy
 from mathutils import Matrix, Vector
 
-from . import assets, character, coords, geometry, lighting, materials
+from . import assets, character, coords, effects, geometry, lighting, materials, unions
 from .props import suspend_updates
 from .rbx import CFrame, enums, load_file
 from .rbx import mesh as rbxmesh
@@ -39,7 +39,8 @@ CLASSIC_HEAD_MESH = "rbxasset://avatar/heads/head.mesh"
 
 # Properties holding asset references, for prefetching downloads
 _ASSET_PROPS = ("MeshId", "MeshID", "TextureID", "TextureId", "Texture", "ShirtTemplate",
-                "PantsTemplate", "Graphic", "ColorMap", "NormalMap", "RoughnessMap", "MetalnessMap")
+                "PantsTemplate", "Graphic", "ColorMap", "NormalMap", "RoughnessMap", "MetalnessMap",
+                "AssetId")
 
 
 class ImportOptions:
@@ -124,6 +125,11 @@ class Importer:
         self.collection = None
         self.roots = []
         self.characters = []
+        self.beams = []
+        self.trails = []
+        self.explosions = []
+        self.attachment_objs = {}
+        self.highlights = []
 
     # ------------------------------------------------------------------
     def run(self, path):
@@ -143,6 +149,10 @@ class Importer:
                 n = character.apply_character_meshes(inst, self.resolver)
                 if n:
                     self.report.count("body package meshes", n)
+                if self.opts.build_rigs:
+                    n = character.weld_loose_accessories(inst)
+                    if n:
+                        self.report.count("accessories attached", n)
 
         is_place = any(r.class_name in SERVICE_CLASSES for r in doc.roots)
         lighting_inst = None
@@ -175,16 +185,32 @@ class Importer:
                 except Exception as ex:  # keep the import even if rigging fails
                     self.report.warnings.append("%s: rig not built (%s)" % (inst.name, ex))
 
-        # MaterialService.Use2022Materials (places only; models keep the scene's setting)
+        # MaterialService: Use2022Materials, MaterialVariants and overrides (places only;
+        # models keep the scene's settings)
         ms = doc.find_service("MaterialService") if is_place else None
-        use_2022 = ms.get("Use2022Materials") if ms is not None else None
-        if isinstance(use_2022, bool) and use_2022 != self.scene.rblx.use_2022_materials:
-            self.scene.rblx.use_2022_materials = use_2022
+        if ms is not None:
+            from . import materialservice
+            materialservice.import_material_service(self.scene, ms, self.resolver, self.report)
 
         # Materials once everything (layers, colours) is in place
         for obj in self.objects.values():
             if obj.rblx.kind == "PART" and obj.rblx.material_mode != "SURFACE":
                 materials.refresh(obj)
+
+        self.make_beams()
+        self.make_highlights()
+
+        # Post-processing effects: Lighting children and the Workspace camera's
+        post = [c for c in (lighting_inst.children if lighting_inst is not None else [])
+                if c.class_name in effects.POST_CLASSES]
+        ws = doc.find_service("Workspace") if is_place else None
+        for cam in (ws.children if ws is not None else []):
+            if cam.class_name == "Camera":
+                post += [c for c in cam.children if c.class_name in effects.POST_CLASSES]
+        if post and self.opts.import_lighting:
+            effects.set_post_values(self.scene, effects.values_from_instances(post))
+            self.report.count("post effects", len(post))
+        effects.update_cameras(self.scene)
 
         if lighting_inst is not None and self.opts.import_lighting:
             lighting.set_props(self.scene, lighting.values_from_instance(lighting_inst))
@@ -242,6 +268,9 @@ class Importer:
 
     def build(self, inst, parent_obj):
         cls = inst.class_name
+        if cls == "Terrain":
+            self.make_terrain(inst)
+            return
         if cls in SKIP_CLASSES:
             return
         if cls in PART_CLASSES:
@@ -262,9 +291,31 @@ class Importer:
         elif cls in ("PointLight", "SpotLight", "SurfaceLight"):
             if self.opts.import_lights and parent_obj is not None and parent_obj.rblx.kind == "PART":
                 self.make_light(inst, parent_obj)
+        elif cls in effects.EFFECT_CLASSES:
+            if parent_obj is not None and parent_obj.rblx.kind == "PART":
+                self.make_effect(inst, parent_obj)
+        elif cls == "Beam":
+            self.beams.append(inst)
+        elif cls == "Trail":
+            self.trails.append(inst)
+        elif cls == "Explosion":
+            self.explosions.append(inst)
+        elif cls == "Highlight":
+            self.highlights.append((inst, parent_obj))
         elif cls == "Attachment":
             if self.opts.import_attachments and parent_obj is not None and parent_obj.rblx.kind == "PART":
                 self.make_attachment(inst, parent_obj)
+            if parent_obj is not None and parent_obj.rblx.kind == "PART":
+                world = None
+                for c in inst.children:
+                    if c.class_name in effects.EFFECT_CLASSES:  # emitters in attachments
+                        if world is None:
+                            world = self.attachment_world(inst)
+                        self.make_effect(c, parent_obj, world)
+                    elif c.class_name == "Beam":
+                        self.beams.append(c)
+                    elif c.class_name == "Trail":
+                        self.trails.append(c)
         elif cls in PART_MODIFIERS:
             pass  # consumed by make_part
         elif self.has_parts(inst):
@@ -386,8 +437,19 @@ class Importer:
                 placeholder = True
         elif cls in UNION_CLASSES:
             shape = "UNION"
-            placeholder = True
-            self.report.warnings.append("%s: unions can't be decoded yet; imported as a box" % name)
+            initial_size = tuple(inst.get("InitialSize", default=size))
+            try:
+                me = unions.build_union_mesh(inst, self.scale, self.resolver, self.scene, name)
+            except Exception as ex:
+                me = None
+                self.report.warnings.append("%s: union not rebuilt (%s); imported as a box" % (name, ex))
+            if me is None:
+                placeholder = True
+                asset = inst.get("AssetId", default="")
+                if isinstance(asset, str) and asset:
+                    self.report.miss(asset, name, self.resolver.error_for(asset))
+            else:
+                self.report.count("unions")
         else:
             if cls == "WedgePart":
                 shape = "WEDGE"
@@ -467,6 +529,8 @@ class Importer:
         r.transparency = min(max(transparency, 0.0), 1.0)
         r.reflectance = min(max(reflectance, 0.0), 1.0)
         r.material = material_name
+        variant = inst.get("MaterialVariantSerialized", "MaterialVariant", default="")
+        r.material_variant = variant if isinstance(variant, str) else ""
         r.cast_shadow = bool(inst.get("CastShadow", default=True))
         r.anchored = bool(inst.get("Anchored", default=True))
         r.can_collide = bool(inst.get("CanCollide", default=True))
@@ -482,7 +546,8 @@ class Importer:
         r.asset_missing = placeholder and bool(mesh_id)
 
         obj.color = (*color, 1.0 - r.transparency)
-        obj.visible_shadow = r.cast_shadow
+        from .props import casts_shadow
+        obj.visible_shadow = casts_shadow(r)
         if self.opts.hide_invisible and r.transparency >= 0.999:
             obj.display_type = "WIRE"
         materials.ensure_slot(obj)
@@ -609,6 +674,158 @@ class Importer:
         self.report.count("lights")
         return obj
 
+    def make_terrain(self, inst):
+        from . import terrain
+        grid = inst.props.get("SmoothGrid")
+        if isinstance(grid, str):  # blobs that happen to be valid UTF-8 are read as text
+            grid = grid.encode("utf-8", "surrogateescape")
+        if not grid or len(grid) <= 2:
+            return
+        colors = inst.props.get("MaterialColors")
+        if isinstance(colors, str):
+            colors = colors.encode("utf-8", "surrogateescape")
+        water = inst.props.get("WaterColor")
+
+        def num_of(i, key, default):
+            v = i.props.get(key)
+            return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else default
+
+        def num(key, default):
+            return num_of(inst, key, default)
+
+        try:
+            terrain.build(self.context, self.collection, grid, colors or b"",
+                          water if isinstance(water, tuple) else None,
+                          num("WaterTransparency", 0.3), self.scale, self.report,
+                          water_wave_size=num("WaterWaveSize", 0.15),
+                          water_wave_speed=num("WaterWaveSpeed", 10.0),
+                          water_reflectance=num("WaterReflectance", 1.0),
+                          decoration=bool(inst.props.get("Decoration", False)),
+                          grass_length=num("GrassLength", 0.7))
+        except Exception as ex:
+            self.report.warnings.append("Terrain not imported (%s)" % ex)
+        for child in getattr(inst, "children", []):
+            if child.class_name == "Clouds":
+                from . import decoration
+                col = child.props.get("Color")
+                decoration.build_clouds(self.collection, num_of(child, "Cover", 0.5),
+                                        num_of(child, "Density", 0.7),
+                                        col if isinstance(col, tuple) else (1.0, 1.0, 1.0),
+                                        bool(child.props.get("Enabled", True)),
+                                        child.props.get("Name") or "Clouds")
+                self.report.count("clouds")
+
+    def attachment_world(self, att):
+        """World matrix of an Attachment instance (its part's CFrame * its CFrame)."""
+        if att is None or isinstance(att, (str, bytes)) or getattr(att, "class_name", "") != "Attachment":
+            return None
+        part = att.parent
+        cf = att.get("CFrame")
+        if not isinstance(cf, CFrame):
+            cf = CFrame()
+        part_obj = self.objects.get(id(part)) if part is not None else None
+        if part_obj is not None and part_obj in self.world:
+            loc, rot, _ = self.world[part_obj].decompose()
+            base = Matrix.LocRotScale(loc, rot, None)
+        elif part is not None and isinstance(part.get("CFrame"), CFrame):
+            base = coords.cframe_to_matrix(part.props["CFrame"], self.scale)
+        else:
+            return None
+        return base @ coords.cframe_to_matrix(cf, self.scale)
+
+    def make_effect(self, inst, part_obj, world=None):
+        params = effects.params_from_instance(inst)
+        if world is None:
+            loc, rot, _ = self.world[part_obj].decompose()
+            world = Matrix.LocRotScale(loc, rot, None)
+            params["emit_size"] = tuple(geometry.part_box_size(part_obj)) \
+                if part_obj.rblx.shape not in ("MESH", "UNION") else tuple(part_obj.rblx.size)
+        else:
+            params["emit_size"] = (0.0, 0.0, 0.0)  # attachments emit from a point
+        if params["kind"] in ("Fire", "Smoke"):  # these rise from the part, not all of it
+            params["emit_size"] = tuple(min(e, 2.0) for e in params["emit_size"])
+        try:
+            part_world = self.world[part_obj] @ Matrix.Diagonal((*part_obj.scale, 1.0))
+            obj = effects.create_emitter(self.context, params, parent=part_obj, world=world,
+                                         name=inst.name, collection=self.collection,
+                                         resolver=self.resolver, parent_world=part_world)
+        except Exception as ex:
+            self.report.warnings.append("%s: %s not created (%s)" % (inst.name, inst.class_name, ex))
+            return None
+        self.report.count("particle effects")
+        return obj
+
+    def attachment_object(self, att):
+        """An empty for an Attachment instance (made on demand for Beams and Trails)."""
+        if att is None or isinstance(att, (str, bytes)) or getattr(att, "class_name", "") != "Attachment":
+            return None
+        obj = self.attachment_objs.get(id(att))
+        if obj is None:
+            part_obj = self.objects.get(id(att.parent)) if att.parent is not None else None
+            if part_obj is None or part_obj not in self.world:
+                return None
+            obj = self.make_attachment(att, part_obj)
+        return obj
+
+    def make_beams(self):
+        for inst in self.beams:
+            params = effects.beam_params_from_instance(inst, self.attachment_world)
+            if params is None:
+                self.report.warnings.append("%s: Beam needs two attachments" % inst.name)
+                continue
+            p = inst.props
+            a0, a1 = self.attachment_object(p.get("Attachment0")), self.attachment_object(p.get("Attachment1"))
+            if a0 is not None and a1 is not None:
+                effects.create_live_beam(self.context, params, a0, a1, name=inst.name,
+                                         collection=self.collection, resolver=self.resolver)
+            else:
+                obj = effects.create_beam(self.context, params, name=inst.name,
+                                          collection=self.collection, resolver=self.resolver)
+                obj.hide_render = obj.hide_viewport = not params["enabled"]
+            self.report.count("beams")
+        for inst in self.trails:
+            p = inst.props
+            a0, a1 = self.attachment_object(p.get("Attachment0")), self.attachment_object(p.get("Attachment1"))
+            if a0 is None or a1 is None:
+                self.report.warnings.append("%s: Trail needs two attachments" % inst.name)
+                continue
+            effects.create_trail(self.context, effects.trail_params_from_instance(inst), a0, a1,
+                                 name=inst.name, collection=self.collection, resolver=self.resolver)
+            self.report.count("trails")
+        for inst in self.explosions:
+            p = inst.props
+            if p.get("Visible") is False:
+                continue
+            pos = p.get("Position") if isinstance(p.get("Position"), tuple) else (0.0, 0.0, 0.0)
+            radius = float(p.get("BlastRadius", 4.0) or 4.0)
+            effects.explosion_emitters(self.context, coords.vec_to_bl(pos, self.scale), radius * self.scale,
+                                       frame=self.scene.frame_start, collection=self.collection)
+            self.report.count("explosions")
+
+    def make_highlights(self):
+        for inst, parent_obj in self.highlights:
+            p = inst.props
+            if p.get("Enabled") is False:
+                continue
+            adornee = p.get("Adornee")
+            target = self.objects.get(id(adornee)) if adornee is not None and \
+                not isinstance(adornee, (str, bytes)) else None
+            target = target or parent_obj
+            if target is None:
+                continue
+            fill = p.get("FillColor") if isinstance(p.get("FillColor"), tuple) else (1.0, 0.0, 0.0)
+            outline = p.get("OutlineColor") if isinstance(p.get("OutlineColor"), tuple) else (1.0, 1.0, 1.0)
+            for part in effects.highlight_targets(target):
+                with suspend_updates():
+                    r = part.rblx
+                    r.highlight_fill = to_linear(fill)
+                    r.highlight_outline = to_linear(outline)
+                    r.highlight_fill_transparency = float(p.get("FillTransparency", 0.5))
+                    r.highlight_outline_transparency = float(p.get("OutlineTransparency", 0.0))
+                    r.highlight_enabled = True
+                effects.apply_highlight(part, self.scene)
+            self.report.count("highlights")
+
     def make_attachment(self, inst, part_obj):
         cf = inst.get("CFrame")
         if not isinstance(cf, CFrame):
@@ -618,6 +835,7 @@ class Importer:
         obj = self.make_empty(inst.name, part_obj, world, "ATTACHMENT", "Attachment")
         obj.empty_display_type = "SPHERE"
         obj.empty_display_size = 0.15 * self.scale
+        self.attachment_objs[id(inst)] = obj
         self.report.count("attachments")
         return obj
 

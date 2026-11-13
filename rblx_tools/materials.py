@@ -20,6 +20,7 @@ from . import coords, prefs
 ATTR_COLOR = "rblx.color"
 ATTR_TRANSPARENCY = "rblx.transparency"
 ATTR_REFLECTANCE = "rblx.reflectance"
+MATERIAL_VERSION = 3  # bump when the shared material nodes change (2: Highlight, 3: union colours)
 
 # rough, metal, bump strength, bump scale, extra
 PRESETS = {
@@ -470,17 +471,98 @@ def _pattern(nt, kind, scale, loc):
     return None, None
 
 
-def _part_shading(nt, bsdf, name, base_color, alpha, style=None):
+def _tex(v, non_color=False):
+    """An image from a path or an already-loaded image."""
+    if isinstance(v, bpy.types.Image):
+        if non_color:
+            try:
+                v.colorspace_settings.name = "Non-Color"
+            except TypeError:
+                pass
+        return v
+    return load_image(v, non_color=non_color)
+
+
+ROBLOX_TILE_STUDS = 8.0  # Roblox's material textures repeat every 8 studs
+
+
+def use_roblox_textures():
+    p = prefs.get()
+    return getattr(p, "use_roblox_textures", True) if p is not None else True
+
+
+def texture_signature():
+    """Changes when Roblox's textures get installed or switched on/off."""
+    from . import robloxmats
+    if not use_roblox_textures() or not robloxmats.installed():
+        return "procedural"
+    return "roblox:%d" % int(os.path.getmtime(os.path.join(robloxmats.root(), "manifest.json")))
+
+
+def _part_shading(nt, bsdf, name, base_color, alpha, style=None, variant=None, terrain=False):
     """Wire the Roblox material look into `bsdf`. `base_color` is a colour
-    socket (the part colour, possibly with layers); `alpha` an alpha socket."""
+    socket (the part colour, possibly with layers); `alpha` an alpha socket.
+    `variant`: a MaterialService MaterialVariant whose maps replace the material's."""
     style = style or material_style()
     rough, metal, _bump_strength, _bump_scale, extra = PRESETS.get(name, PRESETS["Plastic"])
     if style == "LEGACY" and metal < 0.5:
         rough = min(1.0, rough + 0.08)  # the old materials were a little less glossy
     p = prefs.get()
-    textures = _find_material_textures(bpy.path.abspath(p.material_folder) if p else "", name,
-                                       style)
-    tile = 1.0 / max((p.material_tile_studs if p else 4.0), 0.01) / coords.stud_scale()
+    if variant is not None:
+        textures = {role: img for role, img in (("color", variant.color_map),
+                                                 ("normal", variant.normal_map),
+                                                 ("roughness", variant.roughness_map),
+                                                 ("metalness", variant.metalness_map)) if img}
+        tile = 1.0 / max(variant.studs_per_tile, 0.01) / coords.stud_scale()
+    else:
+        textures = _find_material_textures(bpy.path.abspath(p.material_folder) if p else "", name,
+                                           style)
+        tile = 1.0 / max((p.material_tile_studs if p else 4.0), 0.01) / coords.stud_scale()
+        if not textures and use_roblox_textures():
+            # Roblox's own textures (downloaded once from Roblox's CDN)
+            from . import robloxmats
+            textures = robloxmats.textures_for(name, style, terrain=terrain)
+            if textures:
+                tile = 1.0 / float(textures.get("tile", ROBLOX_TILE_STUDS)) / coords.stud_scale()
+                if terrain:
+                    side = robloxmats.textures_for(name, style, side=True, terrain=True)
+                    if side and side.get("color") != textures.get("color"):
+                        textures["side"] = side
+    side_tex = textures.pop("side", None) if isinstance(textures, dict) else None
+    gain = min(float(textures.pop("gain", 1.0)), 3.0) if isinstance(textures, dict) else 1.0
+    textures.pop("set", None)
+    textures.pop("tile", None)
+    side_tile = tile
+    if side_tex:
+        side_tile = 1.0 / float(side_tex.get("tile", ROBLOX_TILE_STUDS)) / coords.stud_scale()
+
+    def tex_socket(role, loc, non_color=False):
+        """Colour output for a map, blending the side texture in on steep terrain."""
+        img = _tex(textures[role], non_color=non_color)
+        if not img:
+            return None
+        top = _image_node(nt, img, loc, box_projection_scale=tile).outputs["Color"]
+        if side_tex and role in side_tex:
+            simg = _tex(side_tex[role], non_color=non_color)
+            if simg:
+                side_node = _image_node(nt, simg, (loc[0], loc[1] - 250),
+                                        box_projection_scale=side_tile)
+                geo = nt.nodes.new("ShaderNodeNewGeometry")
+                geo.location = (loc[0] - 400, loc[1] - 400)
+                sep = nt.nodes.new("ShaderNodeSeparateXYZ")
+                sep.location = (loc[0] - 250, loc[1] - 400)
+                _link(nt, geo.outputs["Normal"], sep.inputs[0])
+                fac = nt.nodes.new("ShaderNodeMapRange")
+                fac.location = (loc[0] - 100, loc[1] - 400)
+                fac.inputs["From Min"].default_value = 0.55
+                fac.inputs["From Max"].default_value = 0.8
+                _link(nt, sep.outputs["Z"], fac.inputs["Value"])
+                mix = _mix_rgb(nt, "MIX", (loc[0] + 200, loc[1] - 100))
+                _link(nt, fac.outputs["Result"], mix.inputs["Factor"])
+                _link(nt, side_node.outputs["Color"], mix.inputs["A"])
+                _link(nt, top, mix.inputs["B"])
+                return mix.outputs["Result"]
+        return top
 
     detail = None if "color" in textures else surface_detail(name, style)
     height = None
@@ -497,21 +579,38 @@ def _part_shading(nt, bsdf, name, base_color, alpha, style=None):
             base_color = shade.outputs["Result"]
 
     if "color" in textures:
-        img = load_image(textures["color"])
-        if img:
-            tex = _image_node(nt, img, (-200, 650), box_projection_scale=tile)
+        col_out = tex_socket("color", (-200, 650))
+        if col_out is not None:
+            if abs(gain - 1.0) > 1e-3:
+                # Roblox's maps are detail textures: keep the part's colour on average
+                g = _mix_rgb(nt, "MULTIPLY", (50, 650), factor=1.0)
+                g.clamp_result = False
+                _link(nt, col_out, g.inputs["A"])
+                g.inputs["B"].default_value = (gain, gain, gain, 1.0)
+                col_out = g.outputs["Result"]
             mul = _mix_rgb(nt, "MULTIPLY", (250, 450), factor=1.0)
             _link(nt, base_color, mul.inputs["A"])
-            _link(nt, tex.outputs["Color"], mul.inputs["B"])
+            _link(nt, col_out, mul.inputs["B"])
             base_color = mul.outputs["Result"]
+    # Highlight fill (0 unless the part has a Roblox Highlight)
+    fill = _attr(nt, "rblx.highlight_fill", (-100, 950))
+    fill_a = _attr(nt, "rblx.highlight_fill_alpha", (-100, 800))
+    hmix = _mix_rgb(nt, "MIX", (300, 750))
+    _link(nt, fill_a.outputs["Fac"], hmix.inputs["Factor"])
+    _link(nt, base_color, hmix.inputs["A"])
+    _link(nt, fill.outputs["Color"], hmix.inputs["B"])
+    base_color = hmix.outputs["Result"]
+    if not extra.get("emission") and not extra.get("forcefield"):
+        _link(nt, fill.outputs["Color"], _input(bsdf, *_SOCKETS["emission_color"]))
+        glow = _math(nt, "MULTIPLY", b=0.6, loc=(300, 900))
+        _link(nt, fill_a.outputs["Fac"], glow.inputs[0])
+        _link(nt, glow.outputs[0], bsdf.inputs["Emission Strength"])
     _link(nt, base_color, bsdf.inputs["Base Color"])
 
     refl = _attr(nt, ATTR_REFLECTANCE, (-100, -150))
     rough_src = None
     if "roughness" in textures:
-        img = load_image(textures["roughness"], non_color=True)
-        if img:
-            rough_src = _image_node(nt, img, (-200, -650), box_projection_scale=tile).outputs["Color"]
+        rough_src = tex_socket("roughness", (-200, -650), non_color=True)
     if rough_src is not None:
         lerp = nt.nodes.new("ShaderNodeMix")
         lerp.data_type = "FLOAT"
@@ -530,15 +629,18 @@ def _part_shading(nt, bsdf, name, base_color, alpha, style=None):
 
     mmax = _math(nt, "MAXIMUM", b=metal, loc=(300, 0))
     _link(nt, refl.outputs["Fac"], mmax.inputs[0])
+    if "metalness" in textures:
+        mtex = tex_socket("metalness", (-200, -400), non_color=True)
+        if mtex is not None:
+            _link(nt, mtex, mmax.inputs[1])
     _link(nt, mmax.outputs[0], bsdf.inputs["Metallic"])
 
     if "normal" in textures:
-        img = load_image(textures["normal"], non_color=True)
-        if img:
-            tex = _image_node(nt, img, (-200, -900), box_projection_scale=tile)
+        nrm = tex_socket("normal", (-200, -900), non_color=True)
+        if nrm is not None:
             nmap = nt.nodes.new("ShaderNodeNormalMap")
             nmap.location = (300, -800)
-            _link(nt, tex.outputs["Color"], nmap.inputs["Color"])
+            _link(nt, nrm, nmap.inputs["Color"])
             _link(nt, nmap.outputs["Normal"], bsdf.inputs["Normal"])
     elif height is not None and detail[3] > 0.0:
         bump = nt.nodes.new("ShaderNodeBump")
@@ -575,26 +677,211 @@ def _part_shading(nt, bsdf, name, base_color, alpha, style=None):
 
 def _base_sockets(nt):
     color = _attr(nt, ATTR_COLOR, (-1400, 300))
+    # Unions with UsePartColor off keep each original part's colour per face
+    face_col = nt.nodes.new("ShaderNodeAttribute")
+    face_col.attribute_type = "GEOMETRY"
+    face_col.attribute_name = "rbx_color"
+    face_col.location = (-1600, 500)
+    use = nt.nodes.new("ShaderNodeAttribute")
+    use.attribute_type = "GEOMETRY"
+    use.attribute_name = "rbx_use_color"
+    use.location = (-1600, 650)
+    mix = _mix_rgb(nt, "MIX", (-1200, 400))
+    _link(nt, use.outputs["Fac"], mix.inputs["Factor"])
+    _link(nt, color.outputs["Color"], mix.inputs["A"])
+    _link(nt, face_col.outputs["Color"], mix.inputs["B"])
     t = _attr(nt, ATTR_TRANSPARENCY, (-1400, 0))
     inv = _math(nt, "SUBTRACT", a=1.0, loc=(-1200, 0))
     _link(nt, t.outputs["Fac"], inv.inputs[1])
-    return color.outputs["Color"], inv.outputs[0]
+    return mix.outputs["Result"], inv.outputs[0]
 
 
-def part_material(name):
-    """Shared material for a Roblox material type."""
-    mat_name = "RBX " + name
+def variant_signature(variant):
+    if variant is None:
+        return ""
+    return "|".join([variant.base_material, str(round(variant.studs_per_tile, 4))] +
+                    [i.name if i else "" for i in (variant.color_map, variant.normal_map,
+                                                   variant.roughness_map, variant.metalness_map)])
+
+
+def terrain_material(name):
+    """Terrain material: like the part material, with the side texture on slopes."""
+    return part_material(name, terrain=True)
+
+
+WATER_TILE_STUDS = 20.0  # how far one wave texture tile spans (estimated by eye)
+
+
+def _water_sequence(path, label):
+    """One copy of the wave frame sequence per sampler (a Blender image keeps
+    only one frame on the GPU, so two frames of a crossfade need two images)."""
+    name = "RBX Water Waves " + label
+    img = bpy.data.images.get(name)
+    if img is None or os.path.normcase(bpy.path.abspath(img.filepath)) != os.path.normcase(path):
+        img = bpy.data.images.load(path, check_existing=False)
+        img.name = name
+    img.source = "SEQUENCE"
+    try:
+        img.colorspace_settings.name = "Non-Color"
+    except TypeError:
+        pass
+    return img
+
+
+def water_material(wave_size=0.15, wave_speed=10.0, reflectance=1.0):
+    """Terrain water: Roblox's animated wave normal maps (once downloaded, else
+    animated noise), Fresnel reflections, and a WaterColor tint that never
+    fully disappears (Roblox still shows the surface at WaterTransparency 1)."""
+    from . import robloxmats
+    name = "RBX Terrain Water"
+    sig = "water|%s|%.3f|%.3f|%.3f" % (texture_signature(), wave_size, wave_speed, reflectance)
+    mat = bpy.data.materials.get(name)
+    if mat is not None:
+        if not mat.get("rblx_managed") or (mat.get("rblx_variant_sig") == sig and
+                                           mat.get("rblx_version", 1) >= MATERIAL_VERSION):
+            return mat
+        if mat.node_tree is not None and mat.node_tree.animation_data:
+            mat.node_tree.animation_data_clear()
+        nt, bsdf = _init_tree(mat)
+    else:
+        mat, nt, bsdf = _new_material(name)
+    mat["rblx_style"] = material_style()
+    mat["rblx_version"] = MATERIAL_VERSION
+    mat["rblx_variant_sig"] = sig
+    mat["rblx_water"] = [float(wave_size), float(wave_speed), float(reflectance)]
+    mat["rblx_terrain"] = True
+    out = next(n for n in nt.nodes if n.bl_idname == "ShaderNodeOutputMaterial")
+
+    color = _attr(nt, ATTR_COLOR, (-600, 300))
+    trans = _attr(nt, ATTR_TRANSPARENCY, (-900, -300))
+    _link(nt, color.outputs["Color"], bsdf.inputs["Base Color"])
+    bsdf.inputs["Roughness"].default_value = 0.03
+    bsdf.inputs["IOR"].default_value = 1.33
+    spec = _input(bsdf, "Specular IOR Level", "Specular")
+    if spec is not None:
+        spec.default_value = 0.5 * max(0.0, min(1.0, reflectance)) + 0.1
+
+    # Waves: frames per second follow WaterWaveSpeed (10 = Roblox's default)
+    fps = bpy.context.scene.render.fps / max(bpy.context.scene.render.fps_base, 1e-6) \
+        if bpy.context.scene else 24.0
+    rate = max(wave_speed, 0.0) * 0.8 / max(fps, 1.0)  # wave frames per scene frame
+    strength = max(0.0, min(3.0, 0.55 * wave_size / 0.15))
+    frames = robloxmats.water_frames() if use_roblox_textures() else []
+    normal_col = None
+    if frames and strength > 0.0:
+        coord = nt.nodes.new("ShaderNodeTexCoord")
+        coord.location = (-1300, -700)
+        mapping = nt.nodes.new("ShaderNodeMapping")
+        mapping.location = (-1100, -700)
+        mapping.inputs["Scale"].default_value = (1.0 / (WATER_TILE_STUDS * coords.stud_scale()),) * 3
+        _link(nt, coord.outputs["Object"], mapping.inputs["Vector"])
+        texs = []
+        for k, label in enumerate(("A", "B")):
+            node = _image_node(nt, _water_sequence(frames[0], label), (-850, -600 - 300 * k))
+            node.name = "Water Waves " + label
+            iu = node.image_user
+            iu.frame_duration = len(frames)
+            iu.frame_start = 1
+            iu.use_cyclic = True
+            iu.use_auto_refresh = True
+            fc = iu.driver_add("frame_offset")
+            fc.driver.type = "SCRIPTED"
+            fc.driver.expression = "floor(frame * %.6f) + %d - frame" % (rate, k)
+            _link(nt, mapping.outputs["Vector"], node.inputs["Vector"])
+            texs.append(node)
+        blend = nt.nodes.new("ShaderNodeValue")
+        blend.name = blend.label = "Water Wave Blend"
+        blend.location = (-850, -1250)
+        fc = blend.outputs[0].driver_add("default_value")
+        fc.driver.type = "SCRIPTED"
+        fc.driver.expression = "frame * %.6f - floor(frame * %.6f)" % (rate, rate)
+        mix = _mix_rgb(nt, "MIX", (-550, -700))
+        _link(nt, blend.outputs[0], mix.inputs["Factor"])
+        _link(nt, texs[0].outputs["Color"], mix.inputs["A"])
+        _link(nt, texs[1].outputs["Color"], mix.inputs["B"])
+        normal_col = mix.outputs["Result"]
+        nmap = nt.nodes.new("ShaderNodeNormalMap")
+        nmap.location = (-300, -700)
+        nmap.inputs["Strength"].default_value = strength
+        _link(nt, normal_col, nmap.inputs["Color"])
+        _link(nt, nmap.outputs["Normal"], bsdf.inputs["Normal"])
+    elif strength > 0.0:
+        coord = nt.nodes.new("ShaderNodeTexCoord")
+        coord.location = (-1100, -700)
+        noise = nt.nodes.new("ShaderNodeTexNoise")
+        noise.noise_dimensions = "4D"
+        noise.location = (-850, -700)
+        noise.inputs["Scale"].default_value = 0.6 / coords.stud_scale()
+        noise.inputs["Detail"].default_value = 4.0
+        _link(nt, coord.outputs["Object"], noise.inputs["Vector"])
+        fc = noise.inputs["W"].driver_add("default_value")
+        fc.driver.type = "SCRIPTED"
+        fc.driver.expression = "frame * %.6f" % (rate * 0.1)
+        bump = nt.nodes.new("ShaderNodeBump")
+        bump.location = (-300, -700)
+        bump.inputs["Strength"].default_value = 0.25 * strength
+        _link(nt, noise.outputs["Fac"], bump.inputs["Height"])
+        _link(nt, bump.outputs["Normal"], bsdf.inputs["Normal"])
+
+    # Opacity: WaterTransparency, a minimum tint, plus Fresnel at grazing angles
+    opacity = _math(nt, "MULTIPLY_ADD", loc=(-600, -300))
+    opacity.inputs[1].default_value = -0.8
+    opacity.inputs[2].default_value = 0.92  # T=0 -> 0.92, T=1 -> 0.12
+    _link(nt, trans.outputs["Fac"], opacity.inputs[0])
+    fres = nt.nodes.new("ShaderNodeFresnel")
+    fres.location = (-600, -500)
+    fres.inputs["IOR"].default_value = 1.33
+    if bsdf.inputs["Normal"].is_linked:
+        _link(nt, bsdf.inputs["Normal"].links[0].from_socket, fres.inputs["Normal"])
+    refl = _math(nt, "MULTIPLY", b=max(0.0, min(1.0, reflectance)), loc=(-400, -500))
+    _link(nt, fres.outputs["Fac"], refl.inputs[0])
+    inv = _math(nt, "SUBTRACT", a=1.0, loc=(-400, -350))
+    _link(nt, opacity.outputs[0], inv.inputs[1])
+    extra = _math(nt, "MULTIPLY", loc=(-250, -400))
+    _link(nt, inv.outputs[0], extra.inputs[0])
+    _link(nt, refl.outputs[0], extra.inputs[1])
+    total = _math(nt, "ADD", loc=(-100, -350))
+    total.use_clamp = True
+    _link(nt, opacity.outputs[0], total.inputs[0])
+    _link(nt, extra.outputs[0], total.inputs[1])
+    transparent = nt.nodes.new("ShaderNodeBsdfTransparent")
+    transparent.location = (600, -250)
+    mixs = nt.nodes.new("ShaderNodeMixShader")
+    mixs.location = (750, 0)
+    _link(nt, total.outputs[0], mixs.inputs[0])
+    _link(nt, transparent.outputs[0], mixs.inputs[1])
+    _link(nt, bsdf.outputs["BSDF"], mixs.inputs[2])
+    _link(nt, mixs.outputs[0], out.inputs["Surface"])
+    out.location = (950, 0)
+    mat.diffuse_color = (0.05, 0.33, 0.36, 0.6)
+    mat.roughness = 0.03
+    return mat
+
+
+def part_material(name, variant=None, terrain=False):
+    """Shared material for a Roblox material type (or one of MaterialService's
+    MaterialVariants of it)."""
+    if variant is not None:
+        mat_name = "RBX Variant " + variant.name
+    else:
+        mat_name = ("RBX Terrain " if terrain else "RBX ") + name
     style = material_style()
+    sig = variant_signature(variant) + "|" + texture_signature()
     mat = bpy.data.materials.get(mat_name)
     if mat is not None:
-        if mat.get("rblx_style", "2022") == style or not mat.get("rblx_managed"):
+        if not mat.get("rblx_managed") or (mat.get("rblx_style", "2022") == style and
+                                           mat.get("rblx_version", 1) >= MATERIAL_VERSION and
+                                           mat.get("rblx_variant_sig", "") == sig):
             return mat
-        nt, bsdf = _init_tree(mat)  # rebuild in place for the other material style
+        nt, bsdf = _init_tree(mat)  # rebuild in place (other style, version or variant maps)
     else:
         mat, nt, bsdf = _new_material(mat_name)
     mat["rblx_style"] = style
+    mat["rblx_version"] = MATERIAL_VERSION
+    mat["rblx_variant_sig"] = sig
     color, alpha = _base_sockets(nt)
-    rough, metal = _part_shading(nt, bsdf, name, color, alpha, style)
+    rough, metal = _part_shading(nt, bsdf, name, color, alpha, style, variant, terrain)
+    mat["rblx_terrain"] = terrain
     mat.diffuse_color = (0.64, 0.64, 0.65, 1.0)
     mat.roughness = rough
     mat.metallic = metal
@@ -773,7 +1060,9 @@ def _build_layered(mat, obj):
         alpha = acc.outputs[0]
         y -= 700
     style = material_style()
-    _part_shading(nt, bsdf, obj.rblx.material, color, alpha, style)
+    from . import materialservice
+    _part_shading(nt, bsdf, obj.rblx.material, color, alpha, style,
+                  materialservice.variant_for(obj))
     mat["rblx_layered"] = True
     mat["rblx_style"] = style
     mat.diffuse_color = (*obj.rblx.color, 1.0)
@@ -803,7 +1092,8 @@ def refresh(obj):
     else:
         old = obj.material_slots[0].material if obj.material_slots else None
         r.material_mode = "BASIC"
-        assign(obj, part_material(r.material))
+        from . import materialservice
+        assign(obj, part_material(r.material, materialservice.variant_for(obj)))
         if old is not None and old.get("rblx_layered") and old.users == 0:
             bpy.data.materials.remove(old)
 
@@ -814,11 +1104,19 @@ def apply_material_style(scene):
     for obj in scene.objects:
         if obj.rblx.kind == "PART" and obj.type == "MESH" and obj.rblx.material_mode != "SURFACE":
             refresh(obj)
-    style = material_style(scene)
-    for mat in list(bpy.data.materials):  # shared materials no part uses right now
-        if (mat.get("rblx_managed") and not mat.get("rblx_layered") and mat.name.startswith("RBX ")
-                and mat.name[4:] in PRESETS and mat.get("rblx_style", "2022") != style):
+    # shared materials (and terrain ones): part_material rebuilds whichever are out of date
+    for mat in list(bpy.data.materials):
+        if not mat.get("rblx_managed") or mat.get("rblx_layered"):
+            continue
+        if mat.get("rblx_water") is not None:
+            water_material(*[float(v) for v in mat["rblx_water"]])
+        elif mat.name.startswith("RBX Terrain ") and mat.name[12:] in PRESETS:
+            terrain_material(mat.name[12:])
+        elif mat.name.startswith("RBX ") and mat.name[4:] in PRESETS:
             part_material(mat.name[4:])
+
+
+rebuild_all = apply_material_style
 
 
 # ---------------------------------------------------------------------------

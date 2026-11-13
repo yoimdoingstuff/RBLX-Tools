@@ -9,7 +9,7 @@ Camera (like Studio):
 
 Shortcuts: Ctrl+D duplicate, Ctrl+G group as Model, Ctrl+U ungroup,
 Ctrl+R rotate / Ctrl+T tilt 90 degrees, Delete / Backspace delete, Ctrl+Y redo
-(plus Ctrl+1-4 tools and Ctrl+L local/world from build.py).
+(plus 1-4 tools and Ctrl+L local/world from build.py).
 
 These keys live in the Roblox tools' keymap, so they only apply while Build
 Mode is on and a Roblox tool is active.

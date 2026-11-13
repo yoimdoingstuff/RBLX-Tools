@@ -40,6 +40,7 @@ KIND_ITEMS = [
     ("RIG", "Rig", "Character rig (armature built from Motor6D joints)"),
     ("LIGHT", "Light", "PointLight / SpotLight / SurfaceLight"),
     ("ATTACHMENT", "Attachment", "Attachment"),
+    ("EFFECT", "Effect", "ParticleEmitter / Fire / Smoke / Sparkles / Beam"),
 ]
 
 SHAPE_ITEMS = [
@@ -158,9 +159,17 @@ def _on_geometry(self, context):
         geometry.rebuild_part(self.id_data)
 
 
+def casts_shadow(r):
+    """Roblox draws nothing for a fully transparent part, not even its shadow
+    (e.g. a character's HumanoidRootPart, which would shade its Torso)."""
+    return r.cast_shadow and r.transparency < 0.999
+
+
 def _on_appearance(self, context):
     obj = self.id_data
     obj.color = (self.color[0], self.color[1], self.color[2], 1.0 - self.transparency)
+    if self.kind == "PART":
+        obj.visible_shadow = casts_shadow(self)
     if not updates_suspended():
         obj.update_tag()
 
@@ -174,11 +183,18 @@ def _on_material(self, context):
 
 
 def _on_shadow(self, context):
-    self.id_data.visible_shadow = self.cast_shadow
+    self.id_data.visible_shadow = casts_shadow(self)
 
 
 def _noop(self, context):
     pass
+
+
+def _on_highlight(self, context):
+    if updates_suspended():
+        return
+    from . import effects
+    effects.apply_highlight(self.id_data)
 
 
 def _on_material_style(self, context):
@@ -359,6 +375,10 @@ class RBLX_ObjectProps(bpy.types.PropertyGroup):
     material: EnumProperty(name="Material", items=MATERIAL_ITEMS, default="Plastic",
                            update=_upd("material", _on_material))
     material_mode: EnumProperty(name="Surface", items=MATERIAL_MODE_ITEMS, default="BASIC")
+    material_variant: StringProperty(
+        name="MaterialVariant", default="", update=_upd("material_variant", _on_material),
+        description="Name of a MaterialService MaterialVariant to use instead of the plain "
+                    "material (it must have the same base material, like in Roblox)")
     cast_shadow: BoolProperty(name="CastShadow", default=True,
                               update=_upd("cast_shadow", _on_shadow))
 
@@ -383,6 +403,25 @@ class RBLX_ObjectProps(bpy.types.PropertyGroup):
     # Texture layers (Decals, Textures, clothing, TextureID, your own images)
     layers: CollectionProperty(type=RBLX_TextureLayer)
     active_layer: IntProperty(name="Active Layer", default=0, min=0)
+
+    # Highlight (Roblox Highlight instance: fill tint + outline)
+    highlight_enabled: BoolProperty(name="Highlight", default=False,
+                                    update=_upd("highlight_enabled", _on_highlight))
+    highlight_fill: FloatVectorProperty(name="FillColor", size=3, subtype="COLOR", min=0.0,
+                                        max=1.0, default=(1.0, 0.0, 0.0),
+                                        update=_upd("highlight_fill", _on_highlight))
+    highlight_fill_transparency: FloatProperty(
+        name="FillTransparency", min=0.0, max=1.0, default=0.5,
+        update=_upd("highlight_fill_transparency", _on_highlight))
+    highlight_outline: FloatVectorProperty(name="OutlineColor", size=3, subtype="COLOR", min=0.0,
+                                           max=1.0, default=(1.0, 1.0, 1.0),
+                                           update=_upd("highlight_outline", _on_highlight))
+    highlight_outline_transparency: FloatProperty(
+        name="OutlineTransparency", min=0.0, max=1.0, default=0.0,
+        update=_upd("highlight_outline_transparency", _on_highlight))
+    # Read by the materials (kept in sync by apply_highlight)
+    highlight_fill_alpha: FloatProperty(default=0.0, options={"HIDDEN"})
+    highlight_outline_alpha: FloatProperty(default=1.0, options={"HIDDEN"})
 
     # Light
     light_range: FloatProperty(name="Range", default=8.0, min=0.0, max=60.0)
@@ -412,6 +451,25 @@ class RBLX_SceneProps(bpy.types.PropertyGroup):
                               description="Rotate in steps of the Rotate increment")
     rotate_increment: FloatProperty(name="Rotate", default=15.0, min=0.01, max=180.0,
                                     precision=2, description="Rotation step, in degrees")
+    # Animation Mode (Moon Animator / Eclipse style)
+    anim_handle_mode: EnumProperty(
+        name="Handles", default="ROTATE",
+        items=[("ROTATE", "Rotate", "Rotation rings around the joint", "DRIVER_ROTATIONAL_DIFFERENCE", 0),
+               ("MOVE", "Move", "Position arrows", "EMPTY_ARROWS", 1)],
+        description="Which handles Animation Mode shows (R switches, like Moon Animator)")
+    anim_ease_style: EnumProperty(
+        name="Ease", default="LINEAR",
+        items=[("LINEAR", "Linear", ""), ("CONSTANT", "Constant", "Holds until the next keyframe"),
+               ("SINE", "Sine", ""), ("BACK", "Back", ""), ("QUAD", "Quad", ""),
+               ("CUBIC", "Cubic", ""), ("QUART", "Quart", ""), ("QUINT", "Quint", ""),
+               ("EXPO", "Expo", ""), ("CIRC", "Circ", ""), ("BOUNCE", "Bounce", ""),
+               ("ELASTIC", "Elastic", ""), ("BEZIER", "Smooth (Blender)", "Blender's Bezier curve")],
+        description="Easing style for new keyframes: shapes the motion from this keyframe to the next")
+    anim_ease_dir: EnumProperty(
+        name="Direction", default="IN_OUT",
+        items=[("IN", "In", ""), ("OUT", "Out", ""), ("IN_OUT", "InOut", "")],
+        description="Easing direction for new keyframes")
+
     handle_space: EnumProperty(
         name="Space", default="WORLD",
         items=[("WORLD", "World", "Move/Rotate handles follow the world axes", "WORLD", 0),

@@ -969,6 +969,72 @@ class RBLX_OT_clear_cache(bpy.types.Operator):
         return {"FINISHED"}
 
 
+_texture_install = {"running": False, "status": ""}
+
+
+def texture_install_status():
+    return _texture_install["status"], _texture_install["running"]
+
+
+class RBLX_OT_install_material_textures(bpy.types.Operator):
+    """Download Roblox's own material, terrain and water textures (about 60 MB, once) from
+    Roblox's setup CDN (setup.rbxcdn.com) into the asset library, and use them for
+    every Roblox material"""
+    bl_idname = "rblx.install_material_textures"
+    bl_label = "Download Roblox Material Textures"
+
+    def execute(self, context):
+        import threading
+        from . import robloxmats
+        if _texture_install["running"]:
+            self.report({"INFO"}, "Already downloading")
+            return {"CANCELLED"}
+        if not assets.online_allowed():
+            self.report({"ERROR"}, "Blender's online access is off (Preferences > System > Network)")
+            return {"CANCELLED"}
+        _texture_install.update(running=True, status="Starting...", error=None)
+
+        def work():
+            try:
+                robloxmats.install(progress=lambda m: _texture_install.update(status=m))
+            except Exception as ex:  # reported in the panel
+                _texture_install["error"] = str(ex)
+            _texture_install["running"] = False
+
+        def finish():
+            for win in bpy.context.window_manager.windows:
+                for area in win.screen.areas:
+                    area.tag_redraw()
+            if _texture_install["running"]:
+                return 0.5
+            if _texture_install.get("error"):
+                _texture_install["status"] = "Download failed: " + _texture_install["error"]
+            else:
+                _texture_install["status"] = "Installed"
+                for scene in bpy.data.scenes:
+                    materials.rebuild_all(scene)
+            return None
+
+        threading.Thread(target=work, daemon=True).start()
+        bpy.app.timers.register(finish, first_interval=0.5)
+        self.report({"INFO"}, "Downloading Roblox's material textures in the background...")
+        return {"FINISHED"}
+
+
+class RBLX_OT_rebuild_materials(bpy.types.Operator):
+    """Rebuild every Roblox material (parts, terrain, water) with the current settings"""
+    bl_idname = "rblx.rebuild_materials"
+    bl_label = "Rebuild Materials"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        for mat in bpy.data.materials:
+            if mat.get("rblx_managed"):
+                mat["rblx_version"] = 0  # force
+        materials.rebuild_all(context.scene)
+        return {"FINISHED"}
+
+
 class RBLX_OT_test_download(bpy.types.Operator):
     """Download one asset to check your API key / cookie (saved into the asset library)"""
     bl_idname = "rblx.test_download"
@@ -1033,14 +1099,21 @@ class RBLX_OT_lighting_preset(bpy.types.Operator):
 
 
 class RBLX_OT_load_lighting(bpy.types.Operator, ImportHelper):
-    """Load only the Lighting settings from a Roblox place or model file"""
+    """Load a place's look without its parts: Lighting (with its Sky, Atmosphere and
+    post effects), the camera's effects and MaterialService"""
     bl_idname = "rblx.load_lighting"
-    bl_label = "Load Lighting From File"
+    bl_label = "Load Lighting From Place"
     bl_options = {"REGISTER", "UNDO"}
 
     filter_glob: StringProperty(default=ROBLOX_FILES, options={"HIDDEN"})
+    filepath: StringProperty(name="File Path", subtype="FILE_PATH", options={"HIDDEN", "SKIP_SAVE"})
+    materials: BoolProperty(name="MaterialService", default=True,
+                            description="Also load Use2022Materials and MaterialVariants")
+    effects: BoolProperty(name="Post Effects", default=True,
+                          description="Also load Bloom, ColorCorrection, SunRays, Blur, DepthOfField")
 
     def execute(self, context):
+        from . import effects, materialservice
         try:
             doc = load_file(self.filepath)
         except (RobloxFormatError, OSError) as ex:
@@ -1050,8 +1123,26 @@ class RBLX_OT_load_lighting(bpy.types.Operator, ImportHelper):
         if inst is None:
             self.report({"WARNING"}, "No Lighting service in this file")
             return {"CANCELLED"}
+        loaded = ["Lighting"]
         lighting.set_props(context.scene, lighting.values_from_instance(inst))
-        self.report({"INFO"}, "Lighting loaded")
+        L = context.scene.rblx_lighting
+        if L.sky_mode == "SKYBOX" and not lighting.skybox_available(L):
+            self.report({"WARNING"}, "The place's skybox images need a login to download (add an "
+                        "API key or cookie in Import & Assets); using the Roblox-style sky meanwhile")
+        if self.effects:
+            post = [c for c in inst.children if c.class_name in effects.POST_CLASSES]
+            for cam in doc.all_instances():
+                if cam.class_name == "Camera":
+                    post += [c for c in cam.children if c.class_name in effects.POST_CLASSES]
+            if post:
+                effects.set_post_values(context.scene, effects.values_from_instances(post))
+                loaded.append("%d effects" % len(post))
+        ms = next((i for i in doc.all_instances() if i.class_name == "MaterialService"), None)
+        if self.materials and ms is not None:
+            materialservice.import_material_service(context.scene, ms)
+            materialservice._refresh_parts(context)
+            loaded.append("MaterialService")
+        self.report({"INFO"}, "Loaded " + ", ".join(loaded))
         return {"FINISHED"}
 
 
@@ -1108,6 +1199,8 @@ CLASSES = (
     RBLX_OT_import_avatar,
     RBLX_OT_reload_assets,
     RBLX_OT_clear_cache,
+    RBLX_OT_install_material_textures,
+    RBLX_OT_rebuild_materials,
     RBLX_OT_test_download,
     RBLX_OT_apply_lighting,
     RBLX_OT_lighting_preset,

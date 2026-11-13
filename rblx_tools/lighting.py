@@ -35,6 +35,7 @@ def _color(name, default, desc=""):
 
 SKY_ITEMS = [
     ("GRADIENT", "Roblox-style Sky", "Simple sky gradient with a sun disc that follows ClockTime"),
+    ("SKYBOX", "Skybox (Sky)", "The place's Sky skybox: six images (SkyboxBk/Dn/Ft/Lf/Rt/Up)"),
     ("PHYSICAL", "Physical Sky", "Blender's physical sky texture"),
     ("IMAGE", "Sky Image", "Equirectangular image / HDRI"),
     ("NONE", "Solid Color", "Plain background (uses Fog Color)"),
@@ -74,6 +75,32 @@ class RBLX_LightingProps(bpy.types.PropertyGroup):
                                       update=_on_change, description="Atmosphere.Density")
     atmosphere_color: _color("Color", (0.78, 0.67, 0.42))
     atmosphere_haze: FloatProperty(name="Haze", min=0.0, max=10.0, default=0.0, update=_on_change)
+    atmosphere_decay: _color("Decay", (106 / 255, 112 / 255, 125 / 255),
+                             "Atmosphere colour away from the sun")
+    atmosphere_glare: FloatProperty(name="Glare", min=0.0, max=10.0, default=0.0, update=_on_change,
+                                    description="Glow around the sun")
+    atmosphere_offset: FloatProperty(name="Offset", min=0.0, max=1.0, default=0.25,
+                                     update=_on_change,
+                                     description="How far the atmosphere's colour reaches up "
+                                                 "from the horizon")
+
+    technology: EnumProperty(
+        name="Technology", default="SHADOWMAP", update=_on_change,
+        items=[("LEGACY", "Legacy", ""), ("VOXEL", "Voxel", ""),
+               ("COMPATIBILITY", "Compatibility", ""),
+               ("SHADOWMAP", "ShadowMap", "Sharp sun shadows"),
+               ("FUTURE", "Future", "Turns on Eevee ray tracing (reflections, soft local light)")],
+        description="Lighting.Technology: Future turns on Eevee ray tracing")
+
+    # Sky skybox (asset ids / rbxasset paths)
+    skybox_bk: StringProperty(name="SkyboxBk", default="", update=_on_change)
+    skybox_dn: StringProperty(name="SkyboxDn", default="", update=_on_change)
+    skybox_ft: StringProperty(name="SkyboxFt", default="", update=_on_change)
+    skybox_lf: StringProperty(name="SkyboxLf", default="", update=_on_change)
+    skybox_rt: StringProperty(name="SkyboxRt", default="", update=_on_change)
+    skybox_up: StringProperty(name="SkyboxUp", default="", update=_on_change)
+    skybox_orientation: FloatVectorProperty(name="SkyboxOrientation", size=3, default=(0, 0, 0),
+                                            update=_on_change, description="Degrees")
 
     sky_mode: EnumProperty(name="Sky", items=SKY_ITEMS, default="GRADIENT", update=_on_change)
     sky_image: StringProperty(name="Sky Image", subtype="FILE_PATH", default="", update=_on_change)
@@ -162,6 +189,9 @@ def _sky_colors(elev, props):
         horizon = _lerp(horizon, tuple(props.atmosphere_color), min(1.0, props.atmosphere_density))
         zenith = _lerp(zenith, tuple(props.atmosphere_color),
                        min(1.0, props.atmosphere_density * 0.4 + props.atmosphere_haze * 0.03))
+        # Decay: the atmosphere's colour away from the sun; Offset lifts it up the sky
+        zenith = _lerp(zenith, tuple(props.atmosphere_decay),
+                       min(1.0, props.atmosphere_density * props.atmosphere_offset * 1.2))
     return zenith, horizon
 
 
@@ -181,8 +211,154 @@ def _world(scene):
 
 
 def _structure_key(props, fog_on):
-    return "%s|%s|%d" % (props.sky_mode, props.sky_image if props.sky_mode == "IMAGE" else "",
-                         int(fog_on))
+    sky = props.sky_image if props.sky_mode == "IMAGE" else ""
+    if props.sky_mode == "SKYBOX":
+        sky = "|".join(_skybox_contents(props)) + "|" + repr(tuple(props.skybox_orientation))
+    return "%s|%s|%d" % (props.sky_mode, sky, int(fog_on))
+
+
+SKYBOX_FACES = ("bk", "dn", "ft", "lf", "rt", "up")
+
+
+def _skybox_contents(props):
+    return [getattr(props, "skybox_" + f) for f in SKYBOX_FACES]
+
+
+def _skybox_image(content):
+    """Image for a skybox face (downloaded / from the asset library / Studio)."""
+    from . import assets, materials
+    content = (content or "").strip()
+    if not content:
+        return None
+    name = "RBX Sky " + content
+    img = bpy.data.images.get(name)
+    if img is not None:
+        return img
+    if content in _SKY_FAILED:
+        return None
+    try:
+        path = assets.default_resolver("", True).resolve_image(content)
+    except Exception:
+        path = None
+    img = materials.load_image(path) if path else None
+    if img is not None:
+        img.name = name
+    else:
+        _SKY_FAILED.add(content)  # don't ask again every time the sky is rebuilt
+    return img
+
+
+_SKY_FAILED = set()
+
+
+def skybox_available(props):
+    return any(_skybox_image(c) is not None for c in _skybox_contents(props))
+
+
+def _build_skybox(nt, out_socket):
+    """World nodes that look up the six Roblox skybox faces by view direction.
+    Faces are in Roblox space (front = -Z): each is seen upright with +Y up;
+    Up / Dn are oriented with their top edge toward the back / the front."""
+    N, L = nt.nodes, nt.links
+    props = bpy.context.scene.rblx_lighting
+    imgs = {f: _skybox_image(c) for f, c in zip(SKYBOX_FACES, _skybox_contents(props))}
+
+    def mop(op, a, b=None, loc=(0, 0)):
+        n = N.new("ShaderNodeMath")
+        n.operation = op
+        n.location = loc
+        for i, v in enumerate((a, b)):
+            if v is None:
+                continue
+            if isinstance(v, (int, float)):
+                n.inputs[i].default_value = v
+            else:
+                L.new(v, n.inputs[i])
+        return n.outputs[0]
+
+    tc = N.new("ShaderNodeTexCoord")
+    tc.location = (-2200, 0)
+    rot = N.new("ShaderNodeVectorRotate")
+    rot.rotation_type = "EULER_XYZ"
+    rot.location = (-2000, 0)
+    o = props.skybox_orientation
+    # Roblox (x, y, z) orientation -> Blender axes
+    rot.inputs["Rotation"].default_value = (math_radians(-o[0]), math_radians(o[2]), math_radians(o[1]))
+    L.new(tc.outputs["Generated"], rot.inputs["Vector"])
+    sep = N.new("ShaderNodeSeparateXYZ")
+    sep.location = (-1800, 0)
+    L.new(rot.outputs["Vector"], sep.inputs[0])
+    # Blender (x, y, z) -> Roblox (-x, z, y)
+    x = mop("MULTIPLY", sep.outputs["X"], -1.0, (-1650, 100))
+    y, z = sep.outputs["Z"], sep.outputs["Y"]
+    ax, ay, az = (mop("ABSOLUTE", v, loc=(-1500, 100 - 100 * i)) for i, v in enumerate((x, y, z)))
+
+    def ge(a, b, loc):
+        return mop("SUBTRACT", 1.0, mop("LESS_THAN", a, b, loc), (loc[0] + 100, loc[1]))
+
+    major_x = mop("MULTIPLY", ge(ax, ay, (-1350, 300)), ge(ax, az, (-1350, 250)), (-1150, 300))
+    major_y = mop("MULTIPLY", mop("SUBTRACT", 1.0, major_x, (-1150, 200)),
+                   ge(ay, az, (-1350, 150)), (-1000, 200))
+    major_z = mop("MULTIPLY", mop("SUBTRACT", 1.0, major_x, (-1150, 100)),
+                   mop("SUBTRACT", 1.0, major_y, (-1000, 100)), (-850, 100))
+    pos = {k: mop("GREATER_THAN", v, 0.0, loc=(-1350, -300 - 60 * i))
+           for i, (k, v) in enumerate((("x", x), ("y", y), ("z", z)))}
+    neg = {k: mop("SUBTRACT", 1.0, v, (-1200, -300 - 60 * i)) for i, (k, v) in enumerate(pos.items())}
+    # face: (mask, u numerator, v numerator, major |axis|)
+    faces = {
+        "ft": (mop("MULTIPLY", major_z, neg["z"], (-700, 600)), x, y, az),
+        "bk": (mop("MULTIPLY", major_z, pos["z"], (-700, 500)), mop("MULTIPLY", x, -1.0), y, az),
+        "rt": (mop("MULTIPLY", major_x, pos["x"], (-700, 400)), z, y, ax),
+        "lf": (mop("MULTIPLY", major_x, neg["x"], (-700, 300)), mop("MULTIPLY", z, -1.0), y, ax),
+        "up": (mop("MULTIPLY", major_y, pos["y"], (-700, 200)), x, z, ay),
+        "dn": (mop("MULTIPLY", major_y, neg["y"], (-700, 100)), x, mop("MULTIPLY", z, -1.0), ay),
+    }
+    total = None
+    yloc = 900
+    for face, (mask, un, vn, major) in faces.items():
+        img = imgs.get(face)
+        if img is None:
+            continue
+        u = mop("MULTIPLY_ADD", mop("DIVIDE", un, major), 0.5, (-450, yloc))
+        u.node.inputs[2].default_value = 0.5
+        v = mop("MULTIPLY_ADD", mop("DIVIDE", vn, major), 0.5, (-450, yloc - 50))
+        v.node.inputs[2].default_value = 0.5
+        comb = N.new("ShaderNodeCombineXYZ")
+        comb.location = (-300, yloc)
+        L.new(u, comb.inputs["X"])
+        L.new(v, comb.inputs["Y"])
+        tex = N.new("ShaderNodeTexImage")
+        tex.image = img
+        tex.extension = "EXTEND"
+        tex.location = (-150, yloc)
+        L.new(comb.outputs[0], tex.inputs["Vector"])
+        part = N.new("ShaderNodeMix")
+        part.data_type = "RGBA"
+        part.blend_type = "MULTIPLY"
+        part.location = (50, yloc)
+        part.inputs["Factor"].default_value = 1.0
+        L.new(tex.outputs["Color"], part.inputs["A"])
+        L.new(mask, part.inputs["B"])
+        if total is None:
+            total = part.outputs["Result"]
+        else:
+            add = N.new("ShaderNodeMix")
+            add.data_type = "RGBA"
+            add.blend_type = "ADD"
+            add.inputs["Factor"].default_value = 1.0
+            add.location = (250, yloc)
+            L.new(total, add.inputs["A"])
+            L.new(part.outputs["Result"], add.inputs["B"])
+            total = add.outputs["Result"]
+        yloc -= 250
+    if total is not None:
+        L.new(total, out_socket)
+        return True
+    return False
+
+
+def math_radians(d):
+    return math.radians(d)
 
 
 def _build_world(world, props, fog_on):
@@ -218,7 +394,10 @@ def _build_world(world, props, fog_on):
     sky_bg.location = (400, -100)
     L.new(sky_bg.outputs[0], mix.inputs[2])
 
-    if props.sky_mode == "GRADIENT":
+    mode = props.sky_mode
+    if mode == "SKYBOX" and not skybox_available(props):
+        mode = "GRADIENT"  # skybox images couldn't be loaded (they may need a login)
+    if mode == "GRADIENT":
         tc = N.new("ShaderNodeTexCoord")
         tc.location = (-900, 0)
         sep = N.new("ShaderNodeSeparateXYZ")
@@ -250,12 +429,14 @@ def _build_world(world, props, fog_on):
         L.new(rng.outputs["Result"], add.inputs["Factor"])
         L.new(ramp.outputs["Color"], add.inputs["A"])
         L.new(add.outputs["Result"], sky_bg.inputs["Color"])
-    elif props.sky_mode == "PHYSICAL":
+    elif mode == "SKYBOX":
+        _build_skybox(nt, sky_bg.inputs["Color"])
+    elif mode == "PHYSICAL":
         sky = N.new("ShaderNodeTexSky")
         sky.name = "RBX_PhysSky"
         sky.location = (-200, -100)
         L.new(sky.outputs["Color"], sky_bg.inputs["Color"])
-    elif props.sky_mode == "IMAGE":
+    elif mode == "IMAGE":
         env = N.new("ShaderNodeTexEnvironment")
         env.name = "RBX_SkyImage"
         env.location = (-200, -100)
@@ -313,7 +494,9 @@ def _update_world(world, props, scene, sun_dir_bl, fog_on, fog_density):
     if dot and disc:
         dot.inputs[1].default_value = sun_dir_bl
         half = math.radians(max(props.sun_angular_size, 0.5) / 2.0 * 0.25)
-        disc.inputs["From Min"].default_value = math.cos(half * 2.0)
+        # Atmosphere.Glare widens the soft edge into a glow around the sun
+        glow = 1.0 + props.atmosphere_glare * props.atmosphere_density * 6.0
+        disc.inputs["From Min"].default_value = math.cos(min(half * 2.0 * glow, 1.5))
         disc.inputs["From Max"].default_value = math.cos(half)
         disc.inputs["To Max"].default_value = 3.0 if (props.celestial_bodies_shown and elev > -0.05) else 0.0
         add = N.get("RBX_SunAdd")
@@ -457,6 +640,13 @@ def apply_lighting(scene):
 
     scene.view_settings.exposure = props.exposure_compensation
 
+    # Technology: Future lighting -> Eevee ray tracing (reflections, contact light)
+    ee = getattr(scene, "eevee", None)
+    if ee is not None and hasattr(ee, "use_raytracing"):
+        ee.use_raytracing = props.technology == "FUTURE"
+    if ee is not None and hasattr(ee, "use_shadows"):
+        ee.use_shadows = props.global_shadows
+
 
 # ---------------------------------------------------------------------------
 # Presets and loading from Roblox files
@@ -563,21 +753,45 @@ def values_from_instance(lighting):
     if isinstance(p.get("GlobalShadows"), bool):
         v["global_shadows"] = p["GlobalShadows"]
 
+    tech = p.get("Technology")
+    if isinstance(tech, int) and not isinstance(tech, bool):
+        v["technology"] = {0: "LEGACY", 1: "VOXEL", 2: "COMPATIBILITY", 3: "SHADOWMAP",
+                           4: "FUTURE"}.get(tech, "SHADOWMAP")
+
     v["atmosphere_density"] = 0.0
     for child in lighting.children:
         cp = child.props
         if child.class_name == "Atmosphere":
-            if isinstance(cp.get("Density"), float):
-                v["atmosphere_density"] = cp["Density"]
-            if isinstance(cp.get("Haze"), float):
-                v["atmosphere_haze"] = cp["Haze"]
+            for name, key in (("Density", "atmosphere_density"), ("Haze", "atmosphere_haze"),
+                              ("Glare", "atmosphere_glare"), ("Offset", "atmosphere_offset")):
+                if isinstance(cp.get(name), float):
+                    v[key] = cp[name]
             if isinstance(cp.get("Color"), tuple):
                 v["atmosphere_color"] = to_linear(cp["Color"])
+            if isinstance(cp.get("Decay"), tuple):
+                v["atmosphere_decay"] = to_linear(cp["Decay"])
         elif child.class_name == "Sky":
             if isinstance(cp.get("CelestialBodiesShown"), bool):
                 v["celestial_bodies_shown"] = cp["CelestialBodiesShown"]
             if isinstance(cp.get("SunAngularSize"), float):
                 v["sun_angular_size"] = cp["SunAngularSize"]
+            faces = {}
+            for face, names in (("bk", ("SkyboxBk", "SkyboxBackContent")),
+                                ("dn", ("SkyboxDn", "SkyboxDownContent")),
+                                ("ft", ("SkyboxFt", "SkyboxFrontContent")),
+                                ("lf", ("SkyboxLf", "SkyboxLeftContent")),
+                                ("rt", ("SkyboxRt", "SkyboxRightContent")),
+                                ("up", ("SkyboxUp", "SkyboxUpContent"))):
+                val = child.get(*names)
+                if isinstance(val, str) and val.strip():
+                    faces[face] = val.strip()
+            if faces:
+                for face, val in faces.items():
+                    v["skybox_" + face] = val
+                v["sky_mode"] = "SKYBOX"
+                orient = cp.get("SkyboxOrientation")
+                if isinstance(orient, tuple) and len(orient) == 3:
+                    v["skybox_orientation"] = orient
     return v
 
 
